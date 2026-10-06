@@ -1,0 +1,8 @@
+name: rynix-quick-start
+version: 0.1.0
+owner: rynix
+dependencies:
+  rynix:
+    path: ../..
+build:
+  optimize: speed

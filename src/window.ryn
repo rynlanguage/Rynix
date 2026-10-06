@@ -1,0 +1,1 @@
+// Window creation is intentionally deferred until a supported platform FFI is selected.

@@ -1,0 +1,5 @@
+build/
+/ryn.lock
+*.obj
+*.o
+*.exe

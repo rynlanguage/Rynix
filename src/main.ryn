@@ -1,0 +1,13 @@
+use math
+use core
+use graphics
+use window
+use input
+use audio
+use three_d
+
+fun main() {
+    point := math::Vec3::new(1.0, 2.0, 3.0)
+    moved := point + math::Vec3::new(1.0, 0.0, -1.0)
+    echo moved
+}

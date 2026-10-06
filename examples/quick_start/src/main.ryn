@@ -1,0 +1,26 @@
+use rynix::math
+
+fun main() {
+    position := math::Vec3::new(1.0, 2.0, 3.0)
+    offset := math::Vec3::new(0.5, 0.0, -1.0)
+    moved := position + offset
+    up := math::Vec3::new(0.0, 1.0, 0.0)
+    right := math::Vec3::new(1.0, 0.0, 0.0)
+    direction := up.cross(right)
+    normalized := moved.normalized()
+    uv_origin := math::Vec2::new(0.25, 0.75)
+    uv := uv_origin * 2.0
+    homogeneous_position := math::Vec4::new(moved.x, moved.y, moved.z, 1.0)
+    homogeneous_offset := math::Vec4::new(0.0, 0.0, 0.0, 1.0)
+    homogeneous := homogeneous_position + homogeneous_offset
+    tint := math::Color::rgb(80, 160, 240)
+
+    echo moved
+    echo direction
+    echo normalized
+    echo uv
+    echo homogeneous
+    echo math::Color::BLACK
+    echo tint
+    echo moved.length()
+}
