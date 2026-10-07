@@ -1,0 +1,44 @@
+// Frame timing on the monotonic clock. Values are seconds.
+use std::time
+
+pub struct Clock {
+    started: f64,
+    last: f64,
+    delta: f32,
+    frames: u32,
+    fps_window: f64,
+    fps: f32,
+}
+
+extend Clock {
+    pub fun start() -> Clock {
+        now := time::monotonic()
+        return Clock { started: now, last: now, delta: 0.0, frames: 0, fps_window: now, fps: 0.0 }
+    }
+
+    // Call once per frame. Returns the seconds since the previous tick, capped at 0.25.
+    pub fun tick(mut self) -> f32 {
+        now := time::monotonic()
+        mut delta := (now - self.last) as f32
+        when delta < (0.0 as f32) { delta = 0.0 }
+        // A single long stall, such as dragging the window, would otherwise teleport moving objects.
+        when delta > (0.25 as f32) { delta = 0.25 }
+        self.last = now
+        self.delta = delta
+        self.frames = self.frames + (1 as u32)
+        span := now - self.fps_window
+        when span >= 0.5 {
+            self.fps = ((self.frames as f64) / span) as f32
+            self.frames = 0
+            self.fps_window = now
+        }
+        return delta
+    }
+
+    // The value the last tick returned.
+    pub fun delta(self) -> f32 => self.delta
+    // Seconds since start.
+    pub fun elapsed(self) -> f64 => time::monotonic() - self.started
+    // Frames per second, averaged over roughly half a second of ticks.
+    pub fun fps(self) -> f32 => self.fps
+}

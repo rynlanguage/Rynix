@@ -5,6 +5,7 @@ use window
 use input
 use audio
 use rynix::three_d
+use rynix::time
 
 fun main() {
     point := math::Vec3::new(1.0, 2.0, 3.0)

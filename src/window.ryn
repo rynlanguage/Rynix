@@ -53,12 +53,18 @@ type DispatchMessageFn = extern "C" fun(*Message) -> i64
 type GetClientRectFn = extern "C" fun(*u8, *Rect) -> i32
 type SetWindowTextFn = extern "C" fun(*u8, *WideText) -> i32
 type SetWindowPosFn = extern "C" fun(*u8, *u8, i32, i32, i32, i32, u32) -> i32
-type GetAsyncKeyStateFn = extern "C" fun(i32) -> i16
 type GetCursorPosFn = extern "C" fun(*Point) -> i32
 type ScreenToClientFn = extern "C" fun(*u8, *Point) -> i32
 type LoadCursorFn = extern "C" fun(*u8, *u8) -> *u8
 type SetCursorFn = extern "C" fun(*u8) -> *u8
 type MsgWaitFn = extern "C" fun(u32, *u8, i32, u32, u32) -> u32
+type GetKeyboardStateFn = extern "C" fun(*KeyboardState) -> i32
+type GetForegroundWindowFn = extern "C" fun() -> *u8
+type GetWindowThreadFn = extern "C" fun(*u8, *u8) -> u32
+
+type KeyboardData = [u8; 256]
+#[repr(C)]
+struct KeyboardState { data: KeyboardData }
 
 // WM_CLOSE is swallowed. The title-bar button and Alt+F4 do not destroy the window;
 // Window.close posts the destroy through the cached DestroyWindow pointer.
@@ -168,6 +174,28 @@ extend KeyCode {
     pub const SHIFT: KeyCode = KeyCode { code: 16 }
     pub const CONTROL: KeyCode = KeyCode { code: 17 }
     pub const ALT: KeyCode = KeyCode { code: 18 }
+    pub const NUM0: KeyCode = KeyCode { code: 48 }
+    pub const NUM1: KeyCode = KeyCode { code: 49 }
+    pub const NUM2: KeyCode = KeyCode { code: 50 }
+    pub const NUM3: KeyCode = KeyCode { code: 51 }
+    pub const NUM4: KeyCode = KeyCode { code: 52 }
+    pub const NUM5: KeyCode = KeyCode { code: 53 }
+    pub const NUM6: KeyCode = KeyCode { code: 54 }
+    pub const NUM7: KeyCode = KeyCode { code: 55 }
+    pub const NUM8: KeyCode = KeyCode { code: 56 }
+    pub const NUM9: KeyCode = KeyCode { code: 57 }
+    pub const F1: KeyCode = KeyCode { code: 112 }
+    pub const F2: KeyCode = KeyCode { code: 113 }
+    pub const F3: KeyCode = KeyCode { code: 114 }
+    pub const F4: KeyCode = KeyCode { code: 115 }
+    pub const F5: KeyCode = KeyCode { code: 116 }
+    pub const F6: KeyCode = KeyCode { code: 117 }
+    pub const F7: KeyCode = KeyCode { code: 118 }
+    pub const F8: KeyCode = KeyCode { code: 119 }
+    pub const F9: KeyCode = KeyCode { code: 120 }
+    pub const F10: KeyCode = KeyCode { code: 121 }
+    pub const F11: KeyCode = KeyCode { code: 122 }
+    pub const F12: KeyCode = KeyCode { code: 123 }
 }
 
 #[derive(Clone, Eq)]
@@ -195,10 +223,18 @@ pub struct Window {
     adjust_rect: *u8,
     set_window_pos: *u8,
     set_window_text: *u8,
-    async_key_state: *u8,
     cursor_pos: *u8,
     screen_to_client: *u8,
     wait_message: *u8,
+    keyboard_state: *u8,
+    foreground_window: *u8,
+    window_thread: *u8,
+    // Virtual keys as 256 bits each. A destructor struct holds only scalars and pointers.
+    // now* is the state after the last pump; hit* and lift* collect the down and up messages
+    // that pump saw, so a tap shorter than one frame still counts as pressed and released.
+    now0: u64, now1: u64, now2: u64, now3: u64,
+    hit0: u64, hit1: u64, hit2: u64, hit3: u64,
+    lift0: u64, lift1: u64, lift2: u64, lift3: u64,
 }
 
 fun user32_ready(user32: *u8) -> bool {
@@ -216,12 +252,14 @@ fun user32_ready(user32: *u8) -> bool {
         && has_symbol(user32, "GetClientRect")
         && has_symbol(user32, "SetWindowPos")
         && has_symbol(user32, "SetWindowTextW")
-        && has_symbol(user32, "GetAsyncKeyState")
         && has_symbol(user32, "GetCursorPos")
         && has_symbol(user32, "ScreenToClient")
         && has_symbol(user32, "LoadCursorW")
         && has_symbol(user32, "SetCursor")
         && has_symbol(user32, "MsgWaitForMultipleObjects")
+        && has_symbol(user32, "GetKeyboardState")
+        && has_symbol(user32, "GetForegroundWindow")
+        && has_symbol(user32, "GetWindowThreadProcessId")
 }
 
 fun inert_window(null_handle: *u8) -> Window {
@@ -238,11 +276,59 @@ fun inert_window(null_handle: *u8) -> Window {
         adjust_rect: null_handle,
         set_window_pos: null_handle,
         set_window_text: null_handle,
-        async_key_state: null_handle,
         cursor_pos: null_handle,
         screen_to_client: null_handle,
         wait_message: null_handle,
+        keyboard_state: null_handle,
+        foreground_window: null_handle,
+        window_thread: null_handle,
+        now0: 0, now1: 0, now2: 0, now3: 0,
+        hit0: 0, hit1: 0, hit2: 0, hit3: 0,
+        lift0: 0, lift1: 0, lift2: 0, lift3: 0,
     }
+}
+
+// Maps an input message to the virtual key it changes, or 0. WM_KEYDOWN repeats while a key
+// is held; bit 30 of l_param marks those repeats, so only the first one counts as a press.
+fun message_key(message: u32, w_param: u64, l_param: i64) -> u32 {
+    when message == 256 || message == 260 {
+        when ((l_param >> 30) & 1) != (0 as i64) { return 0 }
+        return (w_param & 255) as u32
+    }
+    when message == 257 || message == 261 { return (w_param & 255) as u32 }
+    when message == 513 || message == 514 { return 1 }
+    when message == 516 || message == 517 { return 2 }
+    when message == 519 || message == 520 { return 4 }
+    return 0
+}
+
+// WM_KEYDOWN, WM_SYSKEYDOWN, and the left, right, and middle button-down messages.
+fun message_is_down(message: u32) -> bool {
+    return message == 256 || message == 260 || message == 513 || message == 516 || message == 519
+}
+
+fun bit_of(code: u32) -> u64 => (1 as u64) << (code & 63)
+
+// Packs 64 virtual keys starting at first into one word; bit i is set when key first + i is down.
+fun pack_keys(state: KeyboardState, first: u64) -> u64 {
+    mut word: u64 = 0
+    mut index: u64 = 0
+    while index < 64 {
+        when (state.data[first + index] & 128) != (0 as u8) { word = word | ((1 as u64) << (index as u32)) }
+        index += 1
+    }
+    return word
+}
+
+fun key_bit(w0: u64, w1: u64, w2: u64, w3: u64, code: u32) -> bool {
+    when code > 255 { return false }
+    shift := code & 63
+    word := code >> 6
+    mut bits: u64 = w0
+    when word == 1 { bits = w1 }
+    when word == 2 { bits = w2 }
+    when word == 3 { bits = w3 }
+    return ((bits >> shift) & 1) != (0 as u64)
 }
 
 fun drop_window(window: Window) {
@@ -357,16 +443,21 @@ extend Window {
             adjust_rect: load_symbol(user32, "AdjustWindowRectEx"),
             set_window_pos: load_symbol(user32, "SetWindowPos"),
             set_window_text: load_symbol(user32, "SetWindowTextW"),
-            async_key_state: load_symbol(user32, "GetAsyncKeyState"),
             cursor_pos: load_symbol(user32, "GetCursorPos"),
             screen_to_client: load_symbol(user32, "ScreenToClient"),
             wait_message: load_symbol(user32, "MsgWaitForMultipleObjects"),
+            keyboard_state: load_symbol(user32, "GetKeyboardState"),
+            foreground_window: load_symbol(user32, "GetForegroundWindow"),
+            window_thread: load_symbol(user32, "GetWindowThreadProcessId"),
+            now0: 0, now1: 0, now2: 0, now3: 0,
+            hit0: 0, hit1: 0, hit2: 0, hit3: 0,
+            lift0: 0, lift1: 0, lift2: 0, lift3: 0,
         }
     }
 
     // Waits until a thread message arrives or the timeout elapses, then pumps.
     // A plain sleep on this thread makes Windows keep the spinning busy cursor.
-    pub fun poll_events_for(self, timeout_ms: u32) -> bool {
+    pub fun poll_events_for(mut self, timeout_ms: u32) -> bool {
         when !pointer_is_null(self.wait_message) {
             wait: MsgWaitFn = self.wait_message as MsgWaitFn
             wait(0, self.null_pointer, 0, timeout_ms, 1279)
@@ -375,7 +466,8 @@ extend Window {
     }
 
     // Pumps every message for this thread. The window filter stays null so WM_QUIT is not skipped.
-    pub fun poll_events(self) -> bool {
+    // Key and button edges come from the pumped messages; held state is sampled once afterwards.
+    pub fun poll_events(mut self) -> bool {
         when !self.is_open() { return false }
         when pointer_is_null(self.peek_message) || pointer_is_null(self.translate_message) || pointer_is_null(self.dispatch_message) {
             return false
@@ -387,13 +479,72 @@ extend Window {
             hwnd: self.null_pointer, message: 0, w_param: 0,
             l_param: 0, time: 0, point: Point { x: 0, y: 0 }, private: 0
         }
+        self.hit0 = 0
+        self.hit1 = 0
+        self.hit2 = 0
+        self.hit3 = 0
+        self.lift0 = 0
+        self.lift1 = 0
+        self.lift2 = 0
+        self.lift3 = 0
         while peek(&raw mut message, self.null_pointer, 0, 0, 1) != (0 as i32) {
             when message.message == 18 { return false }
+            code := message_key(message.message, message.w_param, message.l_param)
+            when code != (0 as u32) { self.record_edge(code, message_is_down(message.message)) }
             translate(&raw mut message)
             dispatch(&raw mut message)
         }
+        self.sample_keys()
         return self.is_open()
     }
+
+    fun record_edge(mut self, code: u32, down: bool) {
+        bit := bit_of(code)
+        word := code >> 6
+        when down {
+            when word == 0 { self.hit0 = self.hit0 | bit }
+            when word == 1 { self.hit1 = self.hit1 | bit }
+            when word == 2 { self.hit2 = self.hit2 | bit }
+            when word == 3 { self.hit3 = self.hit3 | bit }
+        } else {
+            when word == 0 { self.lift0 = self.lift0 | bit }
+            when word == 1 { self.lift1 = self.lift1 | bit }
+            when word == 2 { self.lift2 = self.lift2 | bit }
+            when word == 3 { self.lift3 = self.lift3 | bit }
+        }
+    }
+
+    // A key released while another window has focus never reaches this thread, so an unfocused
+    // window reports nothing held instead of a stuck key.
+    fun sample_keys(mut self) {
+        self.now0 = 0
+        self.now1 = 0
+        self.now2 = 0
+        self.now3 = 0
+        when pointer_is_null(self.keyboard_state) || !self.is_focused() { return }
+        mut state := KeyboardState { data: [0; 256] }
+        read_state: GetKeyboardStateFn = self.keyboard_state as GetKeyboardStateFn
+        when read_state(&raw mut state) == (0 as i32) { return }
+        self.now0 = pack_keys(state, 0)
+        self.now1 = pack_keys(state, 64)
+        self.now2 = pack_keys(state, 128)
+        self.now3 = pack_keys(state, 192)
+    }
+
+    // True while the foreground window belongs to this window's thread. Keyboard state is
+    // per thread, so a second Rynix window on the same thread keeps its keys.
+    pub fun is_focused(self) -> bool {
+        when !self.is_open() || pointer_is_null(self.foreground_window) || pointer_is_null(self.window_thread) { return false }
+        foreground: GetForegroundWindowFn = self.foreground_window as GetForegroundWindowFn
+        thread_of: GetWindowThreadFn = self.window_thread as GetWindowThreadFn
+        active := foreground()
+        when pointer_is_null(active) { return false }
+        return thread_of(active, self.null_pointer) == thread_of(self.handle, self.null_pointer)
+    }
+
+    fun is_down(self, code: u32) -> bool => key_bit(self.now0, self.now1, self.now2, self.now3, code)
+    fun was_hit(self, code: u32) -> bool => key_bit(self.hit0, self.hit1, self.hit2, self.hit3, code)
+    fun was_lifted(self, code: u32) -> bool => key_bit(self.lift0, self.lift1, self.lift2, self.lift3, code)
 
     pub fun is_open(self) -> bool {
         when pointer_is_null(self.handle) || pointer_is_null(self.is_window) { return false }
@@ -443,30 +594,16 @@ extend Window {
         return set_text(self.handle, &raw mut wide) != (0 as i32)
     }
 
-    pub fun key_down(self, key: KeyCode) -> bool {
-        when !self.is_open() { return false }
-        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
-        return state(key.code as i32) < (0 as i16)
-    }
+    // Input reflects the state sampled by the last poll_events call.
+    pub fun key_down(self, key: KeyCode) -> bool => self.is_down(key.code)
+    // True when the last poll saw the key go down. Auto-repeat does not count again.
+    pub fun key_pressed(self, key: KeyCode) -> bool => self.was_hit(key.code)
+    // True when the last poll saw the key go up. A tap within one frame is both pressed and released.
+    pub fun key_released(self, key: KeyCode) -> bool => self.was_lifted(key.code)
 
-    // Windows' low transition bit is opportunistic; use key_down for continuous state.
-    pub fun key_pressed(self, key: KeyCode) -> bool {
-        when !self.is_open() { return false }
-        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
-        return (state(key.code as i32) as u16 & 1) != (0 as u16)
-    }
-
-    pub fun mouse_down(self, button: MouseButton) -> bool {
-        when !self.is_open() { return false }
-        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
-        return state(button.code as i32) < (0 as i16)
-    }
-
-    pub fun mouse_pressed(self, button: MouseButton) -> bool {
-        when !self.is_open() { return false }
-        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
-        return (state(button.code as i32) as u16 & 1) != (0 as u16)
-    }
+    pub fun mouse_down(self, button: MouseButton) -> bool => self.is_down(button.code)
+    pub fun mouse_pressed(self, button: MouseButton) -> bool => self.was_hit(button.code)
+    pub fun mouse_released(self, button: MouseButton) -> bool => self.was_lifted(button.code)
 
     pub fun mouse_x(self) -> i32 {
         when !self.is_open() { return 0 }

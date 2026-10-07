@@ -12,6 +12,8 @@ fun main() -> i32 {
     key_was_pressed := window.key_pressed(window::KeyCode::ESCAPE)
     left_is_down := window.mouse_down(window::MouseButton::LEFT)
     left_was_pressed := window.mouse_pressed(window::MouseButton::LEFT)
+    key_was_released := window.key_released(window::KeyCode::F1)
+    left_was_released := window.mouse_released(window::MouseButton::LEFT)
     cursor_x := window.mouse_x()
     cursor_y := window.mouse_y()
     window.close()

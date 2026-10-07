@@ -1,0 +1,50 @@
+// Checks the math helpers. Each failed check returns its own exit code.
+// Results are bound to locals first: Ryn 0.1.0 can misread a nested call result inside a `when` condition.
+use rynix::math
+
+fun near(a: f32, b: f32) -> bool {
+    diff := a - b
+    return diff < (0.0001 as f32) && diff > (0.0 as f32) - (0.0001 as f32)
+}
+
+fun near3(v: math::Vec3, x: f32, y: f32, z: f32) -> bool => near(v.x, x) && near(v.y, y) && near(v.z, z)
+
+fun main() -> i32 {
+    half_turn := math::radians(180.0)
+    right_angle := math::degrees(math::pi() / (2.0 as f32))
+    mixed := math::lerp(2.0, 6.0, 0.25)
+    when !near(half_turn, math::pi()) { return 1 }
+    when !near(right_angle, 90.0) { return 2 }
+    when !near(mixed, 3.0) { return 3 }
+
+    a := math::Vec3::new(1.0, 2.0, 3.0)
+    b := math::Vec3::new(4.0, 6.0, 3.0)
+    gap := a.distance(b)
+    middle := a.lerp(b, 0.5)
+    negated := a.neg()
+    sum := math::Vec3::ZERO.add(math::Vec3::ONE)
+    when !near(gap, 5.0) { return 5 }
+    when !near3(middle, 2.5, 4.0, 3.0) { return 6 }
+    when !near3(negated, -1.0, -2.0, -3.0) { return 7 }
+    when !near3(sum, 1.0, 1.0, 1.0) { return 8 }
+
+    flat := math::Vec2::new(3.0, 4.0)
+    unit_length := flat.normalized().length()
+    flat_distance := flat.distance(math::Vec2::new(0.0, 0.0))
+    when !near(unit_length, 1.0) || !near(flat_distance, 5.0) { return 9 }
+
+    quarter := math::pi() / (2.0 as f32)
+    about_x := math::Mat4::rotation_x(quarter).transform_point(math::Vec3::UP)
+    about_y := math::Mat4::rotation_y(quarter).transform_point(math::Vec3::new(0.0, 0.0, 1.0))
+    about_z := math::Mat4::rotation_z(quarter).transform_point(math::Vec3::new(1.0, 0.0, 0.0))
+    moved := math::Mat4::translation(1.0, 2.0, 3.0).mul(math::Mat4::scale(2.0, 2.0, 2.0)).transform_point(math::Vec3::ONE)
+    when !near3(about_x, 0.0, 0.0, 1.0) { return 10 }
+    when !near3(about_y, 1.0, 0.0, 0.0) { return 11 }
+    when !near3(about_z, 0.0, 1.0, 0.0) { return 12 }
+    when !near3(moved, 3.0, 4.0, 5.0) { return 13 }
+
+    faded := math::Color::RED.with_alpha(10)
+    when faded.a != (10 as u8) || faded.r != (230 as u8) || math::Color::BLANK.a != (0 as u8) { return 14 }
+    echo "math checks passed"
+    return 0
+}

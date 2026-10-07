@@ -1450,10 +1450,15 @@ pub struct Gpu {
     present: *u8,
     queue_wait: *u8,
     device_wait: *u8,
+    hwnd: *u8,
     family: u32,
     format: u32,
+    depth_format: u32,
     width: u32,
     height: u32,
+    // Client size the swapchain was built for. The surface may clamp width and height.
+    client_w: u32,
+    client_h: u32,
     image_count: u32,
 }
 
@@ -1507,10 +1512,14 @@ fun blank_gpu(library: *u8) -> Gpu {
         present: null_handle(),
         queue_wait: null_handle(),
         device_wait: null_handle(),
+        hwnd: null_handle(),
         family: 0,
         format: 0,
+        depth_format: 0,
         width: 0,
         height: 0,
+        client_w: 0,
+        client_h: 0,
         image_count: 0,
     }
 }
@@ -1655,6 +1664,7 @@ extend Gpu {
         library := load_library("vulkan-1.dll")
         when pointer_is_null(library) { return blank_gpu(null_handle()) }
         mut gpu := blank_gpu(library)
+        gpu.hwnd = hwnd
         gpu.get_instance = load_symbol(gpu.library, "vkGetInstanceProcAddr")
         when pointer_is_null(gpu.get_instance) { return gpu }
         gpu.instance = make_instance(gpu.get_instance)
@@ -1692,43 +1702,11 @@ extend Gpu {
         gpu.present = procs.present
         gpu.queue_wait = procs.queue_wait
         gpu.device_wait = procs.device_wait
-        create_swap := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_swapchain_name())
-        images_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::get_swapchain_images_name())
-        view_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_image_view_name())
-        chain := make_swapchain(gpu.device, create_swap, images_fn, view_fn, gpu.surface, chosen)
-        gpu.swapchain = chain.swapchain
-        gpu.view0 = chain.view0
-        gpu.view1 = chain.view1
-        gpu.view2 = chain.view2
-        gpu.view3 = chain.view3
-        gpu.image_count = chain.count
-        when pointer_is_null(gpu.swapchain) || pointer_is_null(gpu.view0) || gpu.image_count == 0 { return gpu }
-        when gpu.image_count > 1 && pointer_is_null(gpu.view1) { return gpu }
-        when gpu.image_count > 2 && pointer_is_null(gpu.view2) { return gpu }
-        when gpu.image_count > 3 && pointer_is_null(gpu.view3) { return gpu }
-        depth := make_depth(gpu.get_instance, gpu.instance, gpu.get_device, gpu.device, gpu.physical, gpu.width, gpu.height)
-        gpu.depth_image = depth.image
-        gpu.depth_memory = depth.memory
-        gpu.depth_view = depth.view
-        when pointer_is_null(gpu.depth_view) { return gpu }
+        when !gpu.build_chain(chosen) { return gpu }
         create_pass := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_render_pass_name())
-        gpu.render_pass = make_pass(gpu.device, create_pass, gpu.format, depth.format)
+        gpu.render_pass = make_pass(gpu.device, create_pass, gpu.format, gpu.depth_format)
         when pointer_is_null(gpu.render_pass) { return gpu }
-        create_fb := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_framebuffer_name())
-        gpu.fb0 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view0, gpu.depth_view, gpu.width, gpu.height)
-        when gpu.image_count > 1 {
-            gpu.fb1 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view1, gpu.depth_view, gpu.width, gpu.height)
-        }
-        when gpu.image_count > 2 {
-            gpu.fb2 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view2, gpu.depth_view, gpu.width, gpu.height)
-        }
-        when gpu.image_count > 3 {
-            gpu.fb3 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view3, gpu.depth_view, gpu.width, gpu.height)
-        }
-        when pointer_is_null(gpu.fb0) { return gpu }
-        when gpu.image_count > 1 && pointer_is_null(gpu.fb1) { return gpu }
-        when gpu.image_count > 2 && pointer_is_null(gpu.fb2) { return gpu }
-        when gpu.image_count > 3 && pointer_is_null(gpu.fb3) { return gpu }
+        when !gpu.build_framebuffers() { return gpu }
         create_shader := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_shader_name())
         gpu.vertex_shader = make_vertex_shader(gpu.device, create_shader)
         gpu.fragment_shader = make_fragment_shader(gpu.device, create_shader)
@@ -1759,6 +1737,115 @@ extend Gpu {
         when pointer_is_null(gpu.image_available) || pointer_is_null(gpu.render_finished) { return gpu }
         return gpu
     }
+
+    // Creates the swapchain, its views, and a matching depth buffer for chosen's extent.
+    fun build_chain(mut self, chosen: VkChosen) -> bool {
+        client := client_size(self.hwnd)
+        self.client_w = client.w
+        self.client_h = client.h
+        self.width = chosen.width
+        self.height = chosen.height
+        create_swap := vk_data::resolve(self.get_device, self.device, vk_data::create_swapchain_name())
+        images_fn := vk_data::resolve(self.get_device, self.device, vk_data::get_swapchain_images_name())
+        view_fn := vk_data::resolve(self.get_device, self.device, vk_data::create_image_view_name())
+        chain := make_swapchain(self.device, create_swap, images_fn, view_fn, self.surface, chosen)
+        self.swapchain = chain.swapchain
+        self.view0 = chain.view0
+        self.view1 = chain.view1
+        self.view2 = chain.view2
+        self.view3 = chain.view3
+        self.image_count = chain.count
+        when pointer_is_null(self.swapchain) || pointer_is_null(self.view0) || self.image_count == 0 { return false }
+        when self.image_count > 1 && pointer_is_null(self.view1) { return false }
+        when self.image_count > 2 && pointer_is_null(self.view2) { return false }
+        when self.image_count > 3 && pointer_is_null(self.view3) { return false }
+        depth := make_depth(self.get_instance, self.instance, self.get_device, self.device, self.physical, self.width, self.height)
+        self.depth_image = depth.image
+        self.depth_memory = depth.memory
+        self.depth_view = depth.view
+        when pointer_is_null(self.depth_view) { return false }
+        // The render pass was created for the first depth format; another one would not be compatible.
+        when self.depth_format != 0 && depth.format != self.depth_format { return false }
+        self.depth_format = depth.format
+        return true
+    }
+
+    fun build_framebuffers(mut self) -> bool {
+        create_fb := vk_data::resolve(self.get_device, self.device, vk_data::create_framebuffer_name())
+        self.fb0 = make_framebuffer(self.device, create_fb, self.render_pass, self.view0, self.depth_view, self.width, self.height)
+        when self.image_count > 1 {
+            self.fb1 = make_framebuffer(self.device, create_fb, self.render_pass, self.view1, self.depth_view, self.width, self.height)
+        }
+        when self.image_count > 2 {
+            self.fb2 = make_framebuffer(self.device, create_fb, self.render_pass, self.view2, self.depth_view, self.width, self.height)
+        }
+        when self.image_count > 3 {
+            self.fb3 = make_framebuffer(self.device, create_fb, self.render_pass, self.view3, self.depth_view, self.width, self.height)
+        }
+        when pointer_is_null(self.fb0) { return false }
+        when self.image_count > 1 && pointer_is_null(self.fb1) { return false }
+        when self.image_count > 2 && pointer_is_null(self.fb2) { return false }
+        when self.image_count > 3 && pointer_is_null(self.fb3) { return false }
+        return true
+    }
+
+    // Destroys everything that depends on the window size. The render pass and pipelines stay.
+    fun release_targets(mut self) {
+        when pointer_is_null(self.device) || pointer_is_null(self.get_device) { return }
+        when !pointer_is_null(self.device_wait) {
+            wait: VkDeviceWaitFn = self.device_wait as VkDeviceWaitFn
+            wait(self.device)
+        }
+        destroy_fb := vk_data::resolve(self.get_device, self.device, vk_data::destroy_framebuffer_name())
+        destroy_view := vk_data::resolve(self.get_device, self.device, vk_data::destroy_image_view_name())
+        destroy_image := vk_data::resolve(self.get_device, self.device, vk_data::destroy_image_name())
+        free_memory := vk_data::resolve(self.get_device, self.device, vk_data::free_memory_name())
+        destroy_swap := vk_data::resolve(self.get_device, self.device, vk_data::destroy_swapchain_name())
+        destroy_child(destroy_fb, self.device, self.fb0)
+        destroy_child(destroy_fb, self.device, self.fb1)
+        destroy_child(destroy_fb, self.device, self.fb2)
+        destroy_child(destroy_fb, self.device, self.fb3)
+        destroy_child(destroy_view, self.device, self.view0)
+        destroy_child(destroy_view, self.device, self.view1)
+        destroy_child(destroy_view, self.device, self.view2)
+        destroy_child(destroy_view, self.device, self.view3)
+        destroy_child(destroy_view, self.device, self.depth_view)
+        destroy_child(destroy_image, self.device, self.depth_image)
+        destroy_child(free_memory, self.device, self.depth_memory)
+        destroy_child(destroy_swap, self.device, self.swapchain)
+        self.fb0 = null_handle()
+        self.fb1 = null_handle()
+        self.fb2 = null_handle()
+        self.fb3 = null_handle()
+        self.view0 = null_handle()
+        self.view1 = null_handle()
+        self.view2 = null_handle()
+        self.view3 = null_handle()
+        self.depth_view = null_handle()
+        self.depth_image = null_handle()
+        self.depth_memory = null_handle()
+        self.swapchain = null_handle()
+        self.image_count = 0
+    }
+
+    // Rebuilds the size-dependent targets for the window's current client area.
+    fun rebuild_targets(mut self) -> bool {
+        when pointer_is_null(self.render_pass) { return false }
+        self.release_targets()
+        families_fn := vk_data::resolve(self.get_instance, self.instance, vk_data::queue_families_name())
+        support_fn := vk_data::resolve(self.get_instance, self.instance, vk_data::surface_support_name())
+        caps_fn := vk_data::resolve(self.get_instance, self.instance, vk_data::surface_caps_name())
+        formats_fn := vk_data::resolve(self.get_instance, self.instance, vk_data::surface_formats_name())
+        chosen := consider_device(families_fn, support_fn, caps_fn, formats_fn, self.surface, self.hwnd, self.physical)
+        when chosen.ok == 0 || chosen.format != self.format || chosen.family != self.family { return false }
+        when !self.build_chain(chosen) { return false }
+        return self.build_framebuffers()
+    }
+
+    // Width of the drawable area in pixels.
+    pub fun width(self) -> u32 => self.width
+    // Height of the drawable area in pixels.
+    pub fun height(self) -> u32 => self.height
 
     fun ready(self) -> bool {
         when pointer_is_null(self.device) || pointer_is_null(self.swapchain) || pointer_is_null(self.command) { return false }
@@ -1828,11 +1915,23 @@ extend Gpu {
     }
 
     // Acquires one swapchain image. The returned frame presents that image when it drops.
-    pub fun begin(self) -> Frame {
+    // A resized window rebuilds the swapchain first. A minimized window yields a frame that draws nothing.
+    pub fun begin(mut self) -> Frame {
+        when pointer_is_null(self.device) || pointer_is_null(self.render_pass) { return inert_frame() }
+        client := client_size(self.hwnd)
+        when client.w == 0 || client.h == 0 { return inert_frame() }
+        when pointer_is_null(self.swapchain) || client.w != self.client_w || client.h != self.client_h {
+            when !self.rebuild_targets() { return inert_frame() }
+        }
         when !self.ready() { return inert_frame() }
         mut index: u32 = 0
         acquire: VkAcquireFn = self.acquire as VkAcquireFn
         result := acquire(self.device, self.swapchain, 1000000000, self.image_available, null_handle(), &raw mut index)
+        // VK_ERROR_OUT_OF_DATE_KHR: drop the swapchain so the next begin rebuilds it.
+        when result == -1000001004 {
+            self.release_targets()
+            return inert_frame()
+        }
         when result != 0 && result != 1000001003 { return inert_frame() }
         reset: VkResetCmdFn = self.reset_command as VkResetCmdFn
         reset(self.command, 0)
@@ -1881,6 +1980,11 @@ extend Gpu {
 }
 
 extend Frame {
+    // Width of this frame in pixels. An inert frame reports 0.
+    pub fun width(self) -> u32 => self.width
+    // Height of this frame in pixels. An inert frame reports 0.
+    pub fun height(self) -> u32 => self.height
+
     fun draw_shape(self, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32, mode: f32) {
         when pointer_is_null(self.command) || pointer_is_null(self.push_constants) || pointer_is_null(self.draw_cmd) { return }
         when pointer_is_null(self.layout) || pointer_is_null(self.pipeline) || pointer_is_null(self.bind_pipeline) { return }

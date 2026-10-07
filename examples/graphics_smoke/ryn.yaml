@@ -1,4 +1,4 @@
-name: rynix-window
+name: rynix-graphics-smoke
 version: 0.2.0
 owner: rynix
 dependencies:

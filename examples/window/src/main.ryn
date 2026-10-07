@@ -1,6 +1,7 @@
 use rynix::graphics
 use rynix::math
 use rynix::three_d
+use rynix::time
 use rynix::window
 
 fun main() {
@@ -23,8 +24,12 @@ fun main() {
     mut last_x: i32 = 0
     mut last_y: i32 = 0
     mut looking: bool = false
-    while window.poll_events_for(16) {
+    mut paused: bool = false
+    mut clock := time::Clock::start()
+    while window.poll_events_for(1) {
+        dt := clock.tick()
         when window.key_down(window::KeyCode::ESCAPE) { window.close() }
+        when window.key_pressed(window::KeyCode::P) { paused = !paused }
         x := window.mouse_x()
         y := window.mouse_y()
         dx := (x - last_x) as f32
@@ -55,16 +60,23 @@ fun main() {
         when window.key_down(window::KeyCode::CONTROL) {
             step = step.add(math::Vec3::new(0.0, 0.0 - 1.0, 0.0))
         }
-        mut speed: f32 = 0.1
-        when window.key_down(window::KeyCode::SHIFT) { speed = 0.3 }
+        // Units per second, so movement does not depend on the frame rate.
+        mut speed: f32 = 6.0
+        when window.key_down(window::KeyCode::SHIFT) { speed = 18.0 }
         when step.length_squared() > (0.0 as f32) {
-            camera.move_by(step.normalized().mul(speed))
+            camera.move_by(step.normalized().mul(speed * dt))
         }
         camera.look_toward(math::Vec3::from_angles(look_yaw, look_pitch))
         frame := gpu.begin()
         frame.clear(math::Color::rgb(18, 22, 34))
         frame.draw_cube(camera, math::Vec3::new(0.0, -0.56, 0.0), math::Vec3::new(5.0, 0.1, 5.0), 0.0)
         frame.draw_cube(camera, math::Vec3::new(0.0, 0.0, 0.0), math::Vec3::new(1.0, 1.0, 1.0), spin)
-        spin = spin + (0.02 as f32)
+        when !paused { spin = spin + (1.2 as f32) * dt }
+        // Pause marker in the top-right corner; frame.width() follows window resizes.
+        when paused {
+            right_edge := frame.width() as i32
+            frame.fill_rect(right_edge - 46, 16, 10, 30, math::Color::WHITE)
+            frame.fill_rect(right_edge - 30, 16, 10, 30, math::Color::WHITE)
+        }
     }
 }
