@@ -1,1 +1,24 @@
-// Camera, transform, and mesh value types are planned for a later milestone.
+// A camera describes where a 3D frame is viewed from. Meshes stay in the graphics module.
+use rynix::math
+
+pub struct Camera {
+    pub eye: math::Vec3,
+    pub target: math::Vec3,
+    pub up: math::Vec3,
+    pub fov_degrees: f32,
+}
+
+extend Camera {
+    pub fun new(eye: math::Vec3, target: math::Vec3, up: math::Vec3, fov_degrees: f32) -> Camera {
+        return Camera { eye: eye, target: target, up: up, fov_degrees: fov_degrees }
+    }
+
+    pub fun move_by(mut self, delta: math::Vec3) {
+        self.eye = self.eye.add(delta)
+        self.target = self.target.add(delta)
+    }
+
+    pub fun look_toward(mut self, forward: math::Vec3) {
+        self.target = self.eye.add(forward)
+    }
+}

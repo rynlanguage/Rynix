@@ -8,6 +8,8 @@ fun main() {
     right := math::Vec3::new(1.0, 0.0, 0.0)
     direction := up.cross(right)
     normalized := moved.normalized()
+    zero := math::Vec3::new(0.0, 0.0, 0.0)
+    zero_normalized := zero.try_normalized()
     uv_origin := math::Vec2::new(0.25, 0.75)
     uv := uv_origin * 2.0
     homogeneous_position := math::Vec4::new(moved.x, moved.y, moved.z, 1.0)
@@ -18,6 +20,7 @@ fun main() {
     echo moved
     echo direction
     echo normalized
+    echo zero_normalized.is_none()
     echo uv
     echo homogeneous
     echo math::Color::BLACK

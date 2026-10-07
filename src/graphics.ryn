@@ -1,1 +1,1949 @@
-// Public rendering concepts belong here. They deliberately contain no Vulkan types.
+// Immediate drawing. Vulkan handles stay inside this module.
+// The first Gpu field is the loader DLL, so a failed open still releases whatever was created.
+use rynix::math
+use rynix::three_d
+use rynix::vk_data
+
+#[repr(C)]
+struct VkClientRect { left: i32, top: i32, right: i32, bottom: i32 }
+#[repr(C)]
+struct VkOut { value: *u8 }
+#[repr(C)]
+struct VkOnePtr { value: *u8 }
+#[repr(C)]
+struct VkName2 { first: *u8, second: *u8 }
+#[repr(C)]
+struct VkHandles4 { a: *u8, b: *u8, c: *u8, d: *u8 }
+#[repr(C)]
+struct VkQueueFamily { flags: u32, count: u32, timestamps: u32, gx: u32, gy: u32, gz: u32 }
+#[repr(C)]
+struct VkFamilyList { items: [VkQueueFamily; 8] }
+#[repr(C)]
+struct VkFormatPair { format: u32, space: u32 }
+#[repr(C)]
+struct VkFormatList { items: [VkFormatPair; 16] }
+#[repr(C)]
+struct VkSurfaceCaps {
+    min_images: u32,
+    max_images: u32,
+    current_w: u32,
+    current_h: u32,
+    min_w: u32,
+    min_h: u32,
+    max_w: u32,
+    max_h: u32,
+    layers: u32,
+    transforms: u32,
+    current_transform: u32,
+    alpha: u32,
+    usage: u32,
+}
+#[repr(C)]
+struct VkApplication {
+    s_type: u32,
+    next: *u8,
+    name: *u8,
+    app_version: u32,
+    engine: *u8,
+    engine_version: u32,
+    api_version: u32,
+}
+#[repr(C)]
+struct VkInstanceInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    app: *u8,
+    layer_count: u32,
+    layers: *u8,
+    ext_count: u32,
+    exts: *u8,
+}
+#[repr(C)]
+struct VkWin32Surface { s_type: u32, next: *u8, flags: u32, instance: *u8, hwnd: *u8 }
+#[repr(C)]
+struct VkDeviceQueue { s_type: u32, next: *u8, flags: u32, family: u32, count: u32, priorities: *u8 }
+#[repr(C)]
+struct VkDeviceInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    queue_count: u32,
+    queues: *u8,
+    layer_count: u32,
+    layers: *u8,
+    ext_count: u32,
+    exts: *u8,
+    features: *u8,
+}
+#[repr(C)]
+struct VkSwapchainInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    surface: *u8,
+    min_images: u32,
+    format: u32,
+    space: u32,
+    width: u32,
+    height: u32,
+    layers: u32,
+    usage: u32,
+    sharing: u32,
+    family_count: u32,
+    families: *u8,
+    transform: u32,
+    alpha: u32,
+    present: u32,
+    clipped: u32,
+    old: *u8,
+}
+#[repr(C)]
+struct VkImageViewInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    image: *u8,
+    view_type: u32,
+    format: u32,
+    r: u32,
+    g: u32,
+    b: u32,
+    a: u32,
+    aspect: u32,
+    base_mip: u32,
+    mip_count: u32,
+    base_layer: u32,
+    layer_count: u32,
+}
+#[repr(C)]
+struct VkAttachment {
+    flags: u32,
+    format: u32,
+    samples: u32,
+    load: u32,
+    store: u32,
+    stencil_load: u32,
+    stencil_store: u32,
+    initial: u32,
+    final_layout: u32,
+}
+#[repr(C)]
+struct VkAttachmentRef { attachment: u32, layout: u32 }
+#[repr(C)]
+struct VkSubpass {
+    flags: u32,
+    bind: u32,
+    input_count: u32,
+    inputs: *u8,
+    color_count: u32,
+    colors: *u8,
+    resolve: *u8,
+    depth: *u8,
+    preserve_count: u32,
+    preserve: *u8,
+}
+#[repr(C)]
+struct VkDependency {
+    src: u32,
+    dst: u32,
+    src_stage: u32,
+    dst_stage: u32,
+    src_access: u32,
+    dst_access: u32,
+    flags: u32,
+}
+#[repr(C)]
+struct VkDependencyPair { first: VkDependency, second: VkDependency }
+#[repr(C)]
+struct VkPassInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    attachment_count: u32,
+    attachments: *u8,
+    subpass_count: u32,
+    subpasses: *u8,
+    dependency_count: u32,
+    dependencies: *u8,
+}
+#[repr(C)]
+struct VkShaderInfo { s_type: u32, next: *u8, flags: u32, code_size: u64, code: *u8 }
+#[repr(C)]
+struct VkPushRange { stages: u32, offset: u32, size: u32 }
+#[repr(C)]
+struct VkLayoutInfo { s_type: u32, next: *u8, flags: u32, set_count: u32, sets: *u8, push_count: u32, push: *u8 }
+#[repr(C)]
+struct VkStageInfo { s_type: u32, next: *u8, flags: u32, stage: u32, module: *u8, name: *u8, spec: *u8 }
+#[repr(C)]
+struct VkStagePair { vertex: VkStageInfo, fragment: VkStageInfo }
+#[repr(C)]
+struct VkVertexInfo { s_type: u32, next: *u8, flags: u32, binding_count: u32, bindings: *u8, attribute_count: u32, attributes: *u8 }
+#[repr(C)]
+struct VkAssemblyInfo { s_type: u32, next: *u8, flags: u32, topology: u32, restart: u32 }
+#[repr(C)]
+struct VkViewportInfo { s_type: u32, next: *u8, flags: u32, viewport_count: u32, viewports: *u8, scissor_count: u32, scissors: *u8 }
+#[repr(C)]
+struct VkRasterInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    depth_clamp: u32,
+    discard: u32,
+    polygon: u32,
+    cull: u32,
+    front: u32,
+    bias_enable: u32,
+    bias_const: f32,
+    bias_clamp: f32,
+    bias_slope: f32,
+    line_width: f32,
+}
+#[repr(C)]
+struct VkSampleInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    samples: u32,
+    shading: u32,
+    min_shading: f32,
+    mask: *u8,
+    alpha_to_coverage: u32,
+    alpha_to_one: u32,
+}
+#[repr(C)]
+struct VkBlendAttachment { enable: u32, src_color: u32, dst_color: u32, color_op: u32, src_alpha: u32, dst_alpha: u32, alpha_op: u32, mask: u32 }
+#[repr(C)]
+struct VkBlendInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    logic_enable: u32,
+    logic: u32,
+    attachment_count: u32,
+    attachments: *u8,
+    c0: f32,
+    c1: f32,
+    c2: f32,
+    c3: f32,
+}
+#[repr(C)]
+struct VkDynamicPair { viewport: u32, scissor: u32 }
+#[repr(C)]
+struct VkDynamicInfo { s_type: u32, next: *u8, flags: u32, count: u32, states: *u8 }
+#[repr(C)]
+struct VkPipelineInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    stage_count: u32,
+    stages: *u8,
+    vertex: *u8,
+    assembly: *u8,
+    tessellation: *u8,
+    viewport: *u8,
+    raster: *u8,
+    multi: *u8,
+    depth: *u8,
+    blend: *u8,
+    dynamic: *u8,
+    layout: *u8,
+    pass: *u8,
+    subpass: u32,
+    base: *u8,
+    base_index: i32,
+}
+#[repr(C)]
+struct VkFramebufferInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    pass: *u8,
+    attachment_count: u32,
+    attachments: *u8,
+    width: u32,
+    height: u32,
+    layers: u32,
+}
+#[repr(C)]
+struct VkViewport { x: f32, y: f32, w: f32, h: f32, min_z: f32, max_z: f32 }
+#[repr(C)]
+struct VkRect { x: i32, y: i32, w: u32, h: u32 }
+#[repr(C)]
+struct VkClear { r: f32, g: f32, b: f32, a: f32 }
+#[repr(C)]
+struct VkPassBegin { s_type: u32, next: *u8, pass: *u8, framebuffer: *u8, area: VkRect, clear_count: u32, clears: *u8 }
+#[repr(C)]
+struct VkCommandBegin { s_type: u32, next: *u8, flags: u32, inherit: *u8 }
+#[repr(C)]
+struct VkPoolInfo { s_type: u32, next: *u8, flags: u32, family: u32 }
+#[repr(C)]
+struct VkCommandAlloc { s_type: u32, next: *u8, pool: *u8, level: u32, count: u32 }
+#[repr(C)]
+struct VkSemaphoreInfo { s_type: u32, next: *u8, flags: u32 }
+#[repr(C)]
+struct VkSubmitInfo {
+    s_type: u32,
+    next: *u8,
+    wait_count: u32,
+    waits: *u8,
+    stages: *u8,
+    cmd_count: u32,
+    cmds: *u8,
+    signal_count: u32,
+    signals: *u8,
+}
+#[repr(C)]
+struct VkPresentInfo {
+    s_type: u32,
+    next: *u8,
+    wait_count: u32,
+    waits: *u8,
+    swapchain_count: u32,
+    swapchains: *u8,
+    indices: *u8,
+    results: *u8,
+}
+#[repr(C)]
+struct VkPush {
+    ox: f32,
+    oy: f32,
+    sx: f32,
+    sy: f32,
+    cr: f32,
+    cg: f32,
+    cb: f32,
+    ca: f32,
+    vw: f32,
+    vh: f32,
+    radius: f32,
+    mode: f32,
+}
+#[repr(C)]
+struct VkImageInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    image_type: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
+    mips: u32,
+    layers: u32,
+    samples: u32,
+    tiling: u32,
+    usage: u32,
+    sharing: u32,
+    family_count: u32,
+    families: *u8,
+    initial: u32,
+}
+#[repr(C)]
+struct VkMemoryRequirements { size: u64, alignment: u64, type_bits: u32 }
+#[repr(C)]
+struct VkAllocInfo { s_type: u32, next: *u8, allocation_size: u64, memory_type: u32 }
+#[repr(C)]
+struct VkMemoryProperties { type_count: u32, types: [u32; 64], heap_count: u32, heaps: [u64; 32] }
+struct VkDepth { image: *u8, memory: *u8, view: *u8, format: u32 }
+#[repr(C)]
+struct VkAttachmentPair { color: VkAttachment, depth: VkAttachment }
+#[repr(C)]
+struct VkView2 { color: *u8, depth: *u8 }
+#[repr(C)]
+struct VkClearDepth { depth: f32, stencil: u32, pad0: u32, pad1: u32 }
+#[repr(C)]
+struct VkClearPair { color: VkClear, depth: VkClearDepth }
+#[repr(C)]
+struct VkStencilOp { fail: u32, pass: u32, depth_fail: u32, compare: u32, compare_mask: u32, write_mask: u32, reference: u32 }
+#[repr(C)]
+struct VkDepthInfo {
+    s_type: u32,
+    next: *u8,
+    flags: u32,
+    test: u32,
+    write: u32,
+    compare: u32,
+    bounds_test: u32,
+    stencil_test: u32,
+    front: VkStencilOp,
+    back: VkStencilOp,
+    min_bounds: f32,
+    max_bounds: f32,
+}
+
+struct VkExtent { w: u32, h: u32 }
+struct VkChosen {
+    physical: *u8,
+    family: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+    images: u32,
+    alpha: u32,
+    transform: u32,
+    ok: u32,
+    reason: u32,
+}
+struct VkChain { swapchain: *u8, view0: *u8, view1: *u8, view2: *u8, view3: *u8, count: u32 }
+struct VkPipelineBundle { pipeline: *u8, layout: *u8 }
+struct VkFrameProcs {
+    acquire: *u8,
+    reset_command: *u8,
+    begin_command: *u8,
+    end_command: *u8,
+    begin_pass: *u8,
+    end_pass: *u8,
+    bind_pipeline: *u8,
+    set_viewport: *u8,
+    set_scissor: *u8,
+    push_constants: *u8,
+    draw_cmd: *u8,
+    submit: *u8,
+    present: *u8,
+    queue_wait: *u8,
+    device_wait: *u8,
+}
+
+type VkModuleFn = extern "C" fun(*u8) -> *u8
+type VkClientRectFn = extern "C" fun(*u8, *VkClientRect) -> i32
+type VkCreateInstanceFn = extern "C" fun(*VkInstanceInfo, *u8, *VkOut) -> i32
+type VkDestroyInstanceFn = extern "C" fun(*u8, *u8)
+type VkEnumDevicesFn = extern "C" fun(*u8, *u32, *VkHandles4) -> i32
+type VkQueueFamiliesFn = extern "C" fun(*u8, *u32, *VkFamilyList)
+type VkCreateSurfaceFn = extern "C" fun(*u8, *VkWin32Surface, *u8, *VkOut) -> i32
+type VkDestroyChildFn = extern "C" fun(*u8, *u8, *u8)
+type VkSurfaceSupportFn = extern "C" fun(*u8, u32, *u8, *u32) -> i32
+type VkSurfaceCapsFn = extern "C" fun(*u8, *u8, *VkSurfaceCaps) -> i32
+type VkSurfaceFormatsFn = extern "C" fun(*u8, *u8, *u32, *VkFormatList) -> i32
+type VkCreateDeviceFn = extern "C" fun(*u8, *VkDeviceInfo, *u8, *VkOut) -> i32
+type VkGetQueueFn = extern "C" fun(*u8, u32, u32, *VkOut)
+type VkCreateSwapchainFn = extern "C" fun(*u8, *VkSwapchainInfo, *u8, *VkOut) -> i32
+type VkSwapchainImagesFn = extern "C" fun(*u8, *u8, *u32, *VkHandles4) -> i32
+type VkCreateViewFn = extern "C" fun(*u8, *VkImageViewInfo, *u8, *VkOut) -> i32
+type VkCreatePassFn = extern "C" fun(*u8, *VkPassInfo, *u8, *VkOut) -> i32
+type VkCreateFbFn = extern "C" fun(*u8, *VkFramebufferInfo, *u8, *VkOut) -> i32
+type VkCreateShaderFn = extern "C" fun(*u8, *VkShaderInfo, *u8, *VkOut) -> i32
+type VkCreateLayoutFn = extern "C" fun(*u8, *VkLayoutInfo, *u8, *VkOut) -> i32
+type VkCreatePipelinesFn = extern "C" fun(*u8, *u8, u32, *VkPipelineInfo, *u8, *VkOut) -> i32
+type VkCreatePoolFn = extern "C" fun(*u8, *VkPoolInfo, *u8, *VkOut) -> i32
+type VkAllocCmdFn = extern "C" fun(*u8, *VkCommandAlloc, *VkOut) -> i32
+type VkResetCmdFn = extern "C" fun(*u8, u32) -> i32
+type VkBeginCmdFn = extern "C" fun(*u8, *VkCommandBegin) -> i32
+type VkEndCmdFn = extern "C" fun(*u8) -> i32
+type VkBeginPassFn = extern "C" fun(*u8, *VkPassBegin, u32)
+type VkEndPassFn = extern "C" fun(*u8)
+type VkBindPipelineFn = extern "C" fun(*u8, u32, *u8)
+type VkSetViewportFn = extern "C" fun(*u8, u32, u32, *VkViewport)
+type VkSetScissorFn = extern "C" fun(*u8, u32, u32, *VkRect)
+type VkPushCmdFn = extern "C" fun(*u8, *u8, u32, u32, u32, *u8)
+type VkDrawFn = extern "C" fun(*u8, u32, u32, u32, u32)
+type VkCreateSemFn = extern "C" fun(*u8, *VkSemaphoreInfo, *u8, *VkOut) -> i32
+type VkAcquireFn = extern "C" fun(*u8, *u8, u64, *u8, *u8, *u32) -> i32
+type VkSubmitFn = extern "C" fun(*u8, u32, *VkSubmitInfo, *u8) -> i32
+type VkPresentFn = extern "C" fun(*u8, *VkPresentInfo) -> i32
+type VkQueueWaitFn = extern "C" fun(*u8) -> i32
+type VkDeviceWaitFn = extern "C" fun(*u8) -> i32
+type VkCreateImageFn = extern "C" fun(*u8, *VkImageInfo, *u8, *VkOut) -> i32
+type VkImageReqsFn = extern "C" fun(*u8, *u8, *VkMemoryRequirements)
+type VkMemoryPropsFn = extern "C" fun(*u8, *VkMemoryProperties)
+type VkAllocMemFn = extern "C" fun(*u8, *VkAllocInfo, *u8, *VkOut) -> i32
+type VkBindImageFn = extern "C" fun(*u8, *u8, *u8, u64) -> i32
+
+fun null_handle() -> *u8 { return 0 as *u8 }
+
+fun created(result: i32, out: VkOut) -> *u8 {
+    when result == 0 && !pointer_is_null(out.value) { return out.value }
+    return null_handle()
+}
+
+fun pick4(index: u32, a: *u8, b: *u8, c: *u8, d: *u8) -> *u8 {
+    when index == 0 { return a }
+    when index == 1 { return b }
+    when index == 2 { return c }
+    when index == 3 { return d }
+    return null_handle()
+}
+
+fun channel(value: u8) -> f32 { return (value as f32) / (255.0 as f32) }
+
+fun empty_family() -> VkQueueFamily {
+    return VkQueueFamily { flags: 0, count: 0, timestamps: 0, gx: 0, gy: 0, gz: 0 }
+}
+
+fun empty_format() -> VkFormatPair { return VkFormatPair { format: 0, space: 0 } }
+
+fun empty_chosen() -> VkChosen {
+    return VkChosen {
+        physical: null_handle(),
+        family: 0,
+        format: 0,
+        width: 0,
+        height: 0,
+        images: 0,
+        alpha: 0,
+        transform: 0,
+        ok: 0,
+        reason: 0,
+    }
+}
+
+fun client_size(hwnd: *u8) -> VkExtent {
+    mut size := VkExtent { w: 0, h: 0 }
+    user32 := load_library("user32.dll")
+    when pointer_is_null(user32) { return size }
+    symbol := load_symbol(user32, "GetClientRect")
+    when pointer_is_null(symbol) {
+        unload_library(user32)
+        return size
+    }
+    get_rect: VkClientRectFn = symbol as VkClientRectFn
+    mut rect := VkClientRect { left: 0, top: 0, right: 0, bottom: 0 }
+    get_rect(hwnd, &raw mut rect)
+    unload_library(user32)
+    when rect.right > rect.left { size.w = (rect.right - rect.left) as u32 }
+    when rect.bottom > rect.top { size.h = (rect.bottom - rect.top) as u32 }
+    return size
+}
+
+fun make_instance(getter: *u8) -> *u8 {
+    create := vk_data::resolve(getter, null_handle(), vk_data::create_instance_name())
+    when pointer_is_null(create) { return null_handle() }
+    mut surface_name := vk_data::extension_surface_name()
+    mut win32_name := vk_data::extension_win32_name()
+    mut names := VkName2 { first: (&raw surface_name) as *u8, second: (&raw win32_name) as *u8 }
+    mut app := VkApplication {
+        s_type: 0,
+        next: null_handle(),
+        name: null_handle(),
+        app_version: 0,
+        engine: null_handle(),
+        engine_version: 0,
+        api_version: 4194304,
+    }
+    mut info := VkInstanceInfo {
+        s_type: 1,
+        next: null_handle(),
+        flags: 0,
+        app: (&raw app) as *u8,
+        layer_count: 0,
+        layers: null_handle(),
+        ext_count: 2,
+        exts: (&raw names) as *u8,
+    }
+    call: VkCreateInstanceFn = create as VkCreateInstanceFn
+    mut out := VkOut { value: null_handle() }
+    result := call(&raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_surface(getter: *u8, instance: *u8, hwnd: *u8) -> *u8 {
+    create := vk_data::resolve(getter, instance, vk_data::create_win32_surface_name())
+    when pointer_is_null(create) { return null_handle() }
+    kernel := load_library("kernel32.dll")
+    when pointer_is_null(kernel) { return null_handle() }
+    symbol := load_symbol(kernel, "GetModuleHandleW")
+    when pointer_is_null(symbol) {
+        unload_library(kernel)
+        return null_handle()
+    }
+    module_fn: VkModuleFn = symbol as VkModuleFn
+    module := module_fn(null_handle())
+    unload_library(kernel)
+    when pointer_is_null(module) { return null_handle() }
+    mut info := VkWin32Surface {
+        s_type: 1000009000,
+        next: null_handle(),
+        flags: 0,
+        instance: module,
+        hwnd: hwnd,
+    }
+    call: VkCreateSurfaceFn = create as VkCreateSurfaceFn
+    mut out := VkOut { value: null_handle() }
+    result := call(instance, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun consider_device(
+    families_fn: *u8,
+    support_fn: *u8,
+    caps_fn: *u8,
+    formats_fn: *u8,
+    surface: *u8,
+    hwnd: *u8,
+    physical: *u8
+) -> VkChosen {
+    mut chosen := empty_chosen()
+    when pointer_is_null(physical) || pointer_is_null(families_fn) || pointer_is_null(support_fn) { return chosen }
+    when pointer_is_null(caps_fn) || pointer_is_null(formats_fn) { return chosen }
+    families: VkQueueFamiliesFn = families_fn as VkQueueFamiliesFn
+    mut available: u32 = 0
+    families(physical, &raw mut available, 0 as *VkFamilyList)
+    when available == 0 {
+        chosen.reason = 2
+        return chosen
+    }
+    mut listed: u32 = available
+    when listed > 8 { listed = 8 }
+    mut list := VkFamilyList { items: [empty_family(); 8] }
+    families(physical, &raw mut listed, &raw mut list)
+    support: VkSurfaceSupportFn = support_fn as VkSurfaceSupportFn
+    mut family_index: u32 = 0
+    mut found_family: u32 = 0
+    mut family: u32 = 0
+    while family_index < listed {
+        item := list.items[family_index]
+        when (item.flags & 1) != 0 && item.count != 0 {
+            mut supported: u32 = 0
+            support_result := support(physical, family_index, surface, &raw mut supported)
+            when support_result == 0 && supported != 0 {
+                found_family = 1
+                family = family_index
+                break
+            }
+        }
+        family_index += 1
+    }
+    when found_family == 0 {
+        chosen.reason = 2
+        return chosen
+    }
+    formats: VkSurfaceFormatsFn = formats_fn as VkSurfaceFormatsFn
+    mut format_count: u32 = 0
+    count_result := formats(physical, surface, &raw mut format_count, 0 as *VkFormatList)
+    when count_result != 0 || format_count == 0 {
+        chosen.reason = 3
+        return chosen
+    }
+    mut format_listed: u32 = format_count
+    when format_listed > 16 { format_listed = 16 }
+    mut format_list := VkFormatList { items: [empty_format(); 16] }
+    list_result := formats(physical, surface, &raw mut format_listed, &raw mut format_list)
+    when list_result != 0 && list_result != 5 {
+        chosen.reason = 3
+        return chosen
+    }
+    mut best: u32 = 0
+    mut format_index: u32 = 0
+    while format_index < format_listed {
+        pair := format_list.items[format_index]
+        when pair.space == 0 && pair.format == 37 && best == 0 { best = 37 }
+        when pair.space == 0 && pair.format == 44 { best = 44 }
+        format_index += 1
+    }
+    when best == 0 {
+        chosen.reason = 3
+        return chosen
+    }
+    caps_call: VkSurfaceCapsFn = caps_fn as VkSurfaceCapsFn
+    mut caps := VkSurfaceCaps {
+        min_images: 0,
+        max_images: 0,
+        current_w: 0,
+        current_h: 0,
+        min_w: 0,
+        min_h: 0,
+        max_w: 0,
+        max_h: 0,
+        layers: 0,
+        transforms: 0,
+        current_transform: 0,
+        alpha: 0,
+        usage: 0,
+    }
+    caps_result := caps_call(physical, surface, &raw mut caps)
+    when caps_result != 0 {
+        chosen.reason = 4
+        return chosen
+    }
+    when (caps.usage & 16) == 0 {
+        chosen.reason = 5
+        return chosen
+    }
+    mut width: u32 = caps.current_w
+    mut height: u32 = caps.current_h
+    when width == 4294967295 || height == 4294967295 {
+        size := client_size(hwnd)
+        width = size.w
+        height = size.h
+    }
+    when width < caps.min_w { width = caps.min_w }
+    when height < caps.min_h { height = caps.min_h }
+    when caps.max_w != 0 && width > caps.max_w { width = caps.max_w }
+    when caps.max_h != 0 && height > caps.max_h { height = caps.max_h }
+    when width == 0 || height == 0 {
+        chosen.reason = 6
+        return chosen
+    }
+    when caps.min_images > 4 {
+        chosen.reason = 7
+        return chosen
+    }
+    mut images: u32 = caps.min_images
+    when images < 2 { images = 2 }
+    when images > 4 { images = 4 }
+    when caps.max_images != 0 && images > caps.max_images {
+        chosen.reason = 7
+        return chosen
+    }
+    mut alpha: u32 = 0
+    when (caps.alpha & 1) != 0 { alpha = 1 }
+    else when (caps.alpha & 2) != 0 { alpha = 2 }
+    else when (caps.alpha & 4) != 0 { alpha = 4 }
+    else when (caps.alpha & 8) != 0 { alpha = 8 }
+    when alpha == 0 {
+        chosen.reason = 8
+        return chosen
+    }
+    mut transform: u32 = caps.current_transform
+    when transform == 0 { transform = 1 }
+    return VkChosen {
+        physical: physical,
+        family: family,
+        format: best,
+        width: width,
+        height: height,
+        images: images,
+        alpha: alpha,
+        transform: transform,
+        ok: 1,
+        reason: 0,
+    }
+}
+
+fun choose_device(getter: *u8, instance: *u8, surface: *u8, hwnd: *u8) -> VkChosen {
+    mut chosen := empty_chosen()
+    enumerate := vk_data::resolve(getter, instance, vk_data::enumerate_devices_name())
+    families_fn := vk_data::resolve(getter, instance, vk_data::queue_families_name())
+    support_fn := vk_data::resolve(getter, instance, vk_data::surface_support_name())
+    caps_fn := vk_data::resolve(getter, instance, vk_data::surface_caps_name())
+    formats_fn := vk_data::resolve(getter, instance, vk_data::surface_formats_name())
+    when pointer_is_null(enumerate) {
+        chosen.reason = 1
+        return chosen
+    }
+    list_devices: VkEnumDevicesFn = enumerate as VkEnumDevicesFn
+    mut available: u32 = 0
+    count_result := list_devices(instance, &raw mut available, 0 as *VkHandles4)
+    when count_result != 0 || available == 0 {
+        chosen.reason = 1
+        return chosen
+    }
+    mut listed: u32 = available
+    when listed > 4 { listed = 4 }
+    mut devices := VkHandles4 { a: null_handle(), b: null_handle(), c: null_handle(), d: null_handle() }
+    list_result := list_devices(instance, &raw mut listed, &raw mut devices)
+    when list_result != 0 && list_result != 5 {
+        chosen.reason = 1
+        return chosen
+    }
+    mut index: u32 = 0
+    while index < listed {
+        physical := pick4(index, devices.a, devices.b, devices.c, devices.d)
+        chosen = consider_device(families_fn, support_fn, caps_fn, formats_fn, surface, hwnd, physical)
+        when chosen.ok != 0 { return chosen }
+        index += 1
+    }
+    when chosen.reason == 0 { chosen.reason = 2 }
+    return chosen
+}
+
+fun make_device(getter: *u8, instance: *u8, physical: *u8, family: u32) -> *u8 {
+    create := vk_data::resolve(getter, instance, vk_data::create_device_name())
+    when pointer_is_null(create) { return null_handle() }
+    mut priority: f32 = 1.0
+    mut queue := VkDeviceQueue {
+        s_type: 2,
+        next: null_handle(),
+        flags: 0,
+        family: family,
+        count: 1,
+        priorities: (&raw priority) as *u8,
+    }
+    mut extension := vk_data::extension_swapchain_name()
+    mut names := VkOnePtr { value: (&raw extension) as *u8 }
+    mut info := VkDeviceInfo {
+        s_type: 3,
+        next: null_handle(),
+        flags: 0,
+        queue_count: 1,
+        queues: (&raw queue) as *u8,
+        layer_count: 0,
+        layers: null_handle(),
+        ext_count: 1,
+        exts: (&raw names) as *u8,
+        features: null_handle(),
+    }
+    call: VkCreateDeviceFn = create as VkCreateDeviceFn
+    mut out := VkOut { value: null_handle() }
+    result := call(physical, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun take_queue(get_queue: *u8, device: *u8, family: u32) -> *u8 {
+    when pointer_is_null(get_queue) { return null_handle() }
+    call: VkGetQueueFn = get_queue as VkGetQueueFn
+    mut out := VkOut { value: null_handle() }
+    call(device, family, 0, &raw mut out)
+    return out.value
+}
+
+fun make_view(device: *u8, create: *u8, image: *u8, format: u32, aspect: u32) -> *u8 {
+    when pointer_is_null(create) || pointer_is_null(image) { return null_handle() }
+    mut info := VkImageViewInfo {
+        s_type: 15,
+        next: null_handle(),
+        flags: 0,
+        image: image,
+        view_type: 1,
+        format: format,
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+        aspect: aspect,
+        base_mip: 0,
+        mip_count: 1,
+        base_layer: 0,
+        layer_count: 1,
+    }
+    call: VkCreateViewFn = create as VkCreateViewFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_swapchain(device: *u8, create: *u8, images_fn: *u8, view_fn: *u8, surface: *u8, chosen: VkChosen) -> VkChain {
+    mut chain := VkChain {
+        swapchain: null_handle(),
+        view0: null_handle(),
+        view1: null_handle(),
+        view2: null_handle(),
+        view3: null_handle(),
+        count: 0,
+    }
+    when pointer_is_null(create) || pointer_is_null(images_fn) || pointer_is_null(view_fn) { return chain }
+    mut info := VkSwapchainInfo {
+        s_type: 1000001000,
+        next: null_handle(),
+        flags: 0,
+        surface: surface,
+        min_images: chosen.images,
+        format: chosen.format,
+        space: 0,
+        width: chosen.width,
+        height: chosen.height,
+        layers: 1,
+        usage: 16,
+        sharing: 0,
+        family_count: 0,
+        families: null_handle(),
+        transform: chosen.transform,
+        alpha: chosen.alpha,
+        present: 2,
+        clipped: 1,
+        old: null_handle(),
+    }
+    call: VkCreateSwapchainFn = create as VkCreateSwapchainFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    chain.swapchain = created(result, out)
+    when pointer_is_null(chain.swapchain) { return chain }
+    list_images: VkSwapchainImagesFn = images_fn as VkSwapchainImagesFn
+    mut available: u32 = 0
+    count_result := list_images(device, chain.swapchain, &raw mut available, 0 as *VkHandles4)
+    when count_result != 0 || available == 0 || available > 4 { return chain }
+    mut listed: u32 = available
+    mut images := VkHandles4 { a: null_handle(), b: null_handle(), c: null_handle(), d: null_handle() }
+    list_result := list_images(device, chain.swapchain, &raw mut listed, &raw mut images)
+    when list_result != 0 && list_result != 5 { return chain }
+    chain.count = listed
+    chain.view0 = make_view(device, view_fn, images.a, chosen.format, 1)
+    when listed > 1 { chain.view1 = make_view(device, view_fn, images.b, chosen.format, 1) }
+    when listed > 2 { chain.view2 = make_view(device, view_fn, images.c, chosen.format, 1) }
+    when listed > 3 { chain.view3 = make_view(device, view_fn, images.d, chosen.format, 1) }
+    return chain
+}
+
+fun empty_depth() -> VkDepth {
+    return VkDepth { image: null_handle(), memory: null_handle(), view: null_handle(), format: 0 }
+}
+
+fun attempt_depth(get_instance: *u8, instance: *u8, get_device: *u8, device: *u8, physical: *u8, width: u32, height: u32, format: u32) -> VkDepth {
+    create_image := vk_data::resolve(get_device, device, vk_data::create_image_name())
+    destroy_image := vk_data::resolve(get_device, device, vk_data::destroy_image_name())
+    requirements := vk_data::resolve(get_device, device, vk_data::image_memory_requirements_name())
+    allocate := vk_data::resolve(get_device, device, vk_data::allocate_memory_name())
+    free_memory := vk_data::resolve(get_device, device, vk_data::free_memory_name())
+    bind_image := vk_data::resolve(get_device, device, vk_data::bind_image_memory_name())
+    create_view := vk_data::resolve(get_device, device, vk_data::create_image_view_name())
+    when pointer_is_null(create_image) || pointer_is_null(requirements) || pointer_is_null(allocate) { return empty_depth() }
+    when pointer_is_null(bind_image) || pointer_is_null(create_view) { return empty_depth() }
+    mut info := VkImageInfo {
+        s_type: 14,
+        next: null_handle(),
+        flags: 0,
+        image_type: 1,
+        format: format,
+        width: width,
+        height: height,
+        depth: 1,
+        mips: 1,
+        layers: 1,
+        samples: 1,
+        tiling: 0,
+        usage: 32,
+        sharing: 0,
+        family_count: 0,
+        families: null_handle(),
+        initial: 0,
+    }
+    create_call: VkCreateImageFn = create_image as VkCreateImageFn
+    mut image_out := VkOut { value: null_handle() }
+    image_result := create_call(device, &raw mut info, null_handle(), &raw mut image_out)
+    image := created(image_result, image_out)
+    when pointer_is_null(image) { return empty_depth() }
+    mut reqs := VkMemoryRequirements { size: 0, alignment: 0, type_bits: 0 }
+    reqs_fn: VkImageReqsFn = requirements as VkImageReqsFn
+    reqs_fn(device, image, &raw mut reqs)
+    when reqs.size == (0 as u64) {
+        destroy_child(destroy_image, device, image)
+        return empty_depth()
+    }
+    mut chosen: u32 = 4294967295
+    mut index: u32 = 0
+    while index < (32 as u32) {
+        bit := (1 as u32) << index
+        when (reqs.type_bits & bit) != (0 as u32) && chosen == (4294967295 as u32) { chosen = index }
+        index = index + (1 as u32)
+    }
+    when chosen == (4294967295 as u32) {
+        destroy_child(destroy_image, device, image)
+        return empty_depth()
+    }
+    mut alloc_info := VkAllocInfo { s_type: 5, next: null_handle(), allocation_size: reqs.size, memory_type: chosen }
+    alloc_call: VkAllocMemFn = allocate as VkAllocMemFn
+    mut memory_out := VkOut { value: null_handle() }
+    memory_result := alloc_call(device, &raw mut alloc_info, null_handle(), &raw mut memory_out)
+    memory := created(memory_result, memory_out)
+    when pointer_is_null(memory) {
+        destroy_child(destroy_image, device, image)
+        return empty_depth()
+    }
+    bind_call: VkBindImageFn = bind_image as VkBindImageFn
+    bind_result := bind_call(device, image, memory, 0 as u64)
+    when bind_result != (0 as i32) {
+        destroy_child(free_memory, device, memory)
+        destroy_child(destroy_image, device, image)
+        return empty_depth()
+    }
+    view := make_view(device, create_view, image, format, 2)
+    when pointer_is_null(view) {
+        destroy_child(free_memory, device, memory)
+        destroy_child(destroy_image, device, image)
+        return empty_depth()
+    }
+    return VkDepth { image: image, memory: memory, view: view, format: format }
+}
+
+fun make_depth(get_instance: *u8, instance: *u8, get_device: *u8, device: *u8, physical: *u8, width: u32, height: u32) -> VkDepth {
+    first := attempt_depth(get_instance, instance, get_device, device, physical, width, height, 126)
+    when !pointer_is_null(first.view) { return first }
+    second := attempt_depth(get_instance, instance, get_device, device, physical, width, height, 129)
+    when !pointer_is_null(second.view) { return second }
+    return attempt_depth(get_instance, instance, get_device, device, physical, width, height, 124)
+}
+
+fun make_pass(device: *u8, create: *u8, format: u32, depth_format: u32) -> *u8 {
+    when pointer_is_null(create) { return null_handle() }
+    mut attachments := VkAttachmentPair {
+        color: VkAttachment {
+            flags: 0,
+            format: format,
+            samples: 1,
+            load: 1,
+            store: 0,
+            stencil_load: 2,
+            stencil_store: 1,
+            initial: 0,
+            final_layout: 1000001002,
+        },
+        depth: VkAttachment {
+            flags: 0,
+            format: depth_format,
+            samples: 1,
+            load: 1,
+            store: 1,
+            stencil_load: 2,
+            stencil_store: 1,
+            initial: 0,
+            final_layout: 3,
+        },
+    }
+    mut color_ref := VkAttachmentRef { attachment: 0, layout: 2 }
+    mut depth_ref := VkAttachmentRef { attachment: 1, layout: 3 }
+    mut subpass := VkSubpass {
+        flags: 0,
+        bind: 0,
+        input_count: 0,
+        inputs: null_handle(),
+        color_count: 1,
+        colors: (&raw color_ref) as *u8,
+        resolve: null_handle(),
+        depth: (&raw depth_ref) as *u8,
+        preserve_count: 0,
+        preserve: null_handle(),
+    }
+    mut dependencies := VkDependencyPair {
+        first: VkDependency {
+            src: 4294967295,
+            dst: 0,
+            src_stage: 1792,
+            dst_stage: 1792,
+            src_access: 0,
+            dst_access: 1280,
+            flags: 0,
+        },
+        second: VkDependency {
+            src: 0,
+            dst: 4294967295,
+            src_stage: 1792,
+            dst_stage: 1792,
+            src_access: 1280,
+            dst_access: 0,
+            flags: 0,
+        },
+    }
+    mut info := VkPassInfo {
+        s_type: 38,
+        next: null_handle(),
+        flags: 0,
+        attachment_count: 2,
+        attachments: (&raw attachments) as *u8,
+        subpass_count: 1,
+        subpasses: (&raw subpass) as *u8,
+        dependency_count: 2,
+        dependencies: (&raw dependencies) as *u8,
+    }
+    call: VkCreatePassFn = create as VkCreatePassFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_framebuffer(device: *u8, create: *u8, pass: *u8, view: *u8, depth: *u8, width: u32, height: u32) -> *u8 {
+    when pointer_is_null(create) || pointer_is_null(view) || pointer_is_null(depth) { return null_handle() }
+    mut attachment := VkView2 { color: view, depth: depth }
+    mut info := VkFramebufferInfo {
+        s_type: 37,
+        next: null_handle(),
+        flags: 0,
+        pass: pass,
+        attachment_count: 2,
+        attachments: (&raw attachment) as *u8,
+        width: width,
+        height: height,
+        layers: 1,
+    }
+    call: VkCreateFbFn = create as VkCreateFbFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_vertex_shader(device: *u8, create: *u8) -> *u8 {
+    when pointer_is_null(create) { return null_handle() }
+    mut words := vk_data::vertex_shader()
+    mut info := VkShaderInfo {
+        s_type: 16,
+        next: null_handle(),
+        flags: 0,
+        code_size: vk_data::vertex_code_bytes(),
+        code: (&raw words) as *u8,
+    }
+    call: VkCreateShaderFn = create as VkCreateShaderFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_fragment_shader(device: *u8, create: *u8) -> *u8 {
+    when pointer_is_null(create) { return null_handle() }
+    mut words := vk_data::fragment_shader()
+    mut info := VkShaderInfo {
+        s_type: 16,
+        next: null_handle(),
+        flags: 0,
+        code_size: vk_data::fragment_code_bytes(),
+        code: (&raw words) as *u8,
+    }
+    call: VkCreateShaderFn = create as VkCreateShaderFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_cube_vertex_shader(device: *u8, create: *u8) -> *u8 {
+    when pointer_is_null(create) { return null_handle() }
+    mut words := vk_data::cube_vertex_shader()
+    mut info := VkShaderInfo {
+        s_type: 16,
+        next: null_handle(),
+        flags: 0,
+        code_size: vk_data::cube_vertex_code_bytes(),
+        code: (&raw words) as *u8,
+    }
+    call: VkCreateShaderFn = create as VkCreateShaderFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_cube_fragment_shader(device: *u8, create: *u8) -> *u8 {
+    when pointer_is_null(create) { return null_handle() }
+    mut words := vk_data::cube_fragment_shader()
+    mut info := VkShaderInfo {
+        s_type: 16,
+        next: null_handle(),
+        flags: 0,
+        code_size: vk_data::cube_fragment_code_bytes(),
+        code: (&raw words) as *u8,
+    }
+    call: VkCreateShaderFn = create as VkCreateShaderFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vertex: *u8, fragment: *u8, depth_test: u32, depth_write: u32, depth_compare: u32, push_size: u32) -> VkPipelineBundle {
+    mut bundle := VkPipelineBundle { pipeline: null_handle(), layout: null_handle() }
+    when pointer_is_null(layout_fn) || pointer_is_null(pipeline_fn) { return bundle }
+    mut entry := vk_data::entry_main_name()
+    entry_name := (&raw entry) as *u8
+    mut stages := VkStagePair {
+        vertex: VkStageInfo {
+            s_type: 18,
+            next: null_handle(),
+            flags: 0,
+            stage: 1,
+            module: vertex,
+            name: entry_name,
+            spec: null_handle(),
+        },
+        fragment: VkStageInfo {
+            s_type: 18,
+            next: null_handle(),
+            flags: 0,
+            stage: 16,
+            module: fragment,
+            name: entry_name,
+            spec: null_handle(),
+        },
+    }
+    mut vertex_info := VkVertexInfo {
+        s_type: 19,
+        next: null_handle(),
+        flags: 0,
+        binding_count: 0,
+        bindings: null_handle(),
+        attribute_count: 0,
+        attributes: null_handle(),
+    }
+    mut assembly := VkAssemblyInfo { s_type: 20, next: null_handle(), flags: 0, topology: 3, restart: 0 }
+    mut viewport_state := VkViewportInfo {
+        s_type: 22,
+        next: null_handle(),
+        flags: 0,
+        viewport_count: 1,
+        viewports: null_handle(),
+        scissor_count: 1,
+        scissors: null_handle(),
+    }
+    mut raster := VkRasterInfo {
+        s_type: 23,
+        next: null_handle(),
+        flags: 0,
+        depth_clamp: 0,
+        discard: 0,
+        polygon: 0,
+        cull: 0,
+        front: 0,
+        bias_enable: 0,
+        bias_const: 0.0,
+        bias_clamp: 0.0,
+        bias_slope: 0.0,
+        line_width: 1.0,
+    }
+    mut multi := VkSampleInfo {
+        s_type: 24,
+        next: null_handle(),
+        flags: 0,
+        samples: 1,
+        shading: 0,
+        min_shading: 0.0,
+        mask: null_handle(),
+        alpha_to_coverage: 0,
+        alpha_to_one: 0,
+    }
+    mut blend_attachment := VkBlendAttachment {
+        enable: 0,
+        src_color: 0,
+        dst_color: 0,
+        color_op: 0,
+        src_alpha: 0,
+        dst_alpha: 0,
+        alpha_op: 0,
+        mask: 15,
+    }
+    mut blend := VkBlendInfo {
+        s_type: 26,
+        next: null_handle(),
+        flags: 0,
+        logic_enable: 0,
+        logic: 0,
+        attachment_count: 1,
+        attachments: (&raw blend_attachment) as *u8,
+        c0: 0.0,
+        c1: 0.0,
+        c2: 0.0,
+        c3: 0.0,
+    }
+    mut dynamic_states := VkDynamicPair { viewport: 0, scissor: 1 }
+    mut dynamic := VkDynamicInfo {
+        s_type: 27,
+        next: null_handle(),
+        flags: 0,
+        count: 2,
+        states: (&raw dynamic_states) as *u8,
+    }
+    mut depth_state := VkDepthInfo {
+        s_type: 25,
+        next: null_handle(),
+        flags: 0,
+        test: depth_test,
+        write: depth_write,
+        compare: depth_compare,
+        bounds_test: 0,
+        stencil_test: 0,
+        front: VkStencilOp { fail: 0, pass: 0, depth_fail: 0, compare: 0, compare_mask: 0, write_mask: 0, reference: 0 },
+        back: VkStencilOp { fail: 0, pass: 0, depth_fail: 0, compare: 0, compare_mask: 0, write_mask: 0, reference: 0 },
+        min_bounds: 0.0,
+        max_bounds: 1.0,
+    }
+    mut push_range := VkPushRange { stages: 17, offset: 0, size: push_size }
+    mut layout_info := VkLayoutInfo {
+        s_type: 30,
+        next: null_handle(),
+        flags: 0,
+        set_count: 0,
+        sets: null_handle(),
+        push_count: 1,
+        push: (&raw push_range) as *u8,
+    }
+    layout_call: VkCreateLayoutFn = layout_fn as VkCreateLayoutFn
+    mut layout_out := VkOut { value: null_handle() }
+    layout_result := layout_call(device, &raw mut layout_info, null_handle(), &raw mut layout_out)
+    bundle.layout = created(layout_result, layout_out)
+    when pointer_is_null(bundle.layout) { return bundle }
+    mut pipe := VkPipelineInfo {
+        s_type: 28,
+        next: null_handle(),
+        flags: 0,
+        stage_count: 2,
+        stages: (&raw stages) as *u8,
+        vertex: (&raw vertex_info) as *u8,
+        assembly: (&raw assembly) as *u8,
+        tessellation: null_handle(),
+        viewport: (&raw viewport_state) as *u8,
+        raster: (&raw raster) as *u8,
+        multi: (&raw multi) as *u8,
+        depth: (&raw depth_state) as *u8,
+        blend: (&raw blend) as *u8,
+        dynamic: (&raw dynamic) as *u8,
+        layout: bundle.layout,
+        pass: pass,
+        subpass: 0,
+        base: null_handle(),
+        base_index: -1,
+    }
+    pipeline_call: VkCreatePipelinesFn = pipeline_fn as VkCreatePipelinesFn
+    mut pipe_out := VkOut { value: null_handle() }
+    pipe_result := pipeline_call(device, null_handle(), 1, &raw mut pipe, null_handle(), &raw mut pipe_out)
+    bundle.pipeline = created(pipe_result, pipe_out)
+    return bundle
+}
+
+fun make_commands(device: *u8, pool_fn: *u8, alloc_fn: *u8, family: u32) -> VkOnePtr {
+    mut holder := VkOnePtr { value: null_handle() }
+    when pointer_is_null(pool_fn) || pointer_is_null(alloc_fn) { return holder }
+    mut pool_info := VkPoolInfo { s_type: 39, next: null_handle(), flags: 2, family: family }
+    pool_call: VkCreatePoolFn = pool_fn as VkCreatePoolFn
+    mut pool_out := VkOut { value: null_handle() }
+    pool_result := pool_call(device, &raw mut pool_info, null_handle(), &raw mut pool_out)
+    holder.value = created(pool_result, pool_out)
+    return holder
+}
+
+fun allocate_command(device: *u8, alloc_fn: *u8, pool: *u8) -> *u8 {
+    when pointer_is_null(alloc_fn) || pointer_is_null(pool) { return null_handle() }
+    mut info := VkCommandAlloc { s_type: 40, next: null_handle(), pool: pool, level: 0, count: 1 }
+    call: VkAllocCmdFn = alloc_fn as VkAllocCmdFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, &raw mut out)
+    return created(result, out)
+}
+
+fun make_semaphore(device: *u8, create: *u8) -> *u8 {
+    when pointer_is_null(create) { return null_handle() }
+    mut info := VkSemaphoreInfo { s_type: 9, next: null_handle(), flags: 0 }
+    call: VkCreateSemFn = create as VkCreateSemFn
+    mut out := VkOut { value: null_handle() }
+    result := call(device, &raw mut info, null_handle(), &raw mut out)
+    return created(result, out)
+}
+
+fun load_frame_procs(getter: *u8, device: *u8) -> VkFrameProcs {
+    return VkFrameProcs {
+        acquire: vk_data::resolve(getter, device, vk_data::acquire_name()),
+        reset_command: vk_data::resolve(getter, device, vk_data::reset_command_name()),
+        begin_command: vk_data::resolve(getter, device, vk_data::begin_command_name()),
+        end_command: vk_data::resolve(getter, device, vk_data::end_command_name()),
+        begin_pass: vk_data::resolve(getter, device, vk_data::begin_render_pass_name()),
+        end_pass: vk_data::resolve(getter, device, vk_data::end_render_pass_name()),
+        bind_pipeline: vk_data::resolve(getter, device, vk_data::bind_pipeline_name()),
+        set_viewport: vk_data::resolve(getter, device, vk_data::set_viewport_name()),
+        set_scissor: vk_data::resolve(getter, device, vk_data::set_scissor_name()),
+        push_constants: vk_data::resolve(getter, device, vk_data::push_constants_name()),
+        draw_cmd: vk_data::resolve(getter, device, vk_data::draw_name()),
+        submit: vk_data::resolve(getter, device, vk_data::queue_submit_name()),
+        present: vk_data::resolve(getter, device, vk_data::queue_present_name()),
+        queue_wait: vk_data::resolve(getter, device, vk_data::queue_wait_name()),
+        device_wait: vk_data::resolve(getter, device, vk_data::device_wait_name()),
+    }
+}
+
+fun procs_ready(procs: VkFrameProcs) -> bool {
+    when pointer_is_null(procs.acquire) || pointer_is_null(procs.reset_command) || pointer_is_null(procs.begin_command) { return false }
+    when pointer_is_null(procs.end_command) || pointer_is_null(procs.begin_pass) || pointer_is_null(procs.end_pass) { return false }
+    when pointer_is_null(procs.bind_pipeline) || pointer_is_null(procs.set_viewport) || pointer_is_null(procs.set_scissor) { return false }
+    when pointer_is_null(procs.push_constants) || pointer_is_null(procs.draw_cmd) || pointer_is_null(procs.submit) { return false }
+    when pointer_is_null(procs.present) || pointer_is_null(procs.queue_wait) || pointer_is_null(procs.device_wait) { return false }
+    return true
+}
+
+fun resolve_device_fn(get_device: *u8, device: *u8, get_instance: *u8, instance: *u8, text: VkText) -> *u8 {
+    when !pointer_is_null(get_device) && !pointer_is_null(device) {
+        return vk_data::resolve(get_device, device, text)
+    }
+    when !pointer_is_null(get_instance) && !pointer_is_null(instance) {
+        return vk_data::resolve(get_instance, instance, text)
+    }
+    return null_handle()
+}
+
+fun destroy_child(function: *u8, parent: *u8, child: *u8) {
+    when pointer_is_null(function) || pointer_is_null(parent) || pointer_is_null(child) { return }
+    destroy: VkDestroyChildFn = function as VkDestroyChildFn
+    destroy(parent, child, null_handle())
+}
+
+fun submit_present(
+    queue: *u8,
+    command: *u8,
+    command_count: u32,
+    image_available: *u8,
+    render_finished: *u8,
+    swapchain: *u8,
+    image_index: u32,
+    submit_fn: *u8,
+    present_fn: *u8,
+    wait_fn: *u8
+) {
+    when pointer_is_null(submit_fn) || pointer_is_null(queue) { return }
+    mut wait := VkOnePtr { value: image_available }
+    mut signal := VkOnePtr { value: render_finished }
+    mut cmd := VkOnePtr { value: command }
+    mut stage: u32 = 1024
+    mut info := VkSubmitInfo {
+        s_type: 4,
+        next: null_handle(),
+        wait_count: 1,
+        waits: (&raw wait) as *u8,
+        stages: (&raw stage) as *u8,
+        cmd_count: command_count,
+        cmds: (&raw cmd) as *u8,
+        signal_count: 1,
+        signals: (&raw signal) as *u8,
+    }
+    submit: VkSubmitFn = submit_fn as VkSubmitFn
+    submit(queue, 1, &raw mut info, null_handle())
+    when !pointer_is_null(present_fn) && !pointer_is_null(swapchain) {
+        mut chain := VkOnePtr { value: swapchain }
+        mut present_wait := VkOnePtr { value: render_finished }
+        mut index: u32 = image_index
+        mut present_info := VkPresentInfo {
+            s_type: 1000001001,
+            next: null_handle(),
+            wait_count: 1,
+            waits: (&raw present_wait) as *u8,
+            swapchain_count: 1,
+            swapchains: (&raw chain) as *u8,
+            indices: (&raw index) as *u8,
+            results: null_handle(),
+        }
+        present: VkPresentFn = present_fn as VkPresentFn
+        present(queue, &raw mut present_info)
+    }
+    when !pointer_is_null(wait_fn) {
+        queue_idle: VkQueueWaitFn = wait_fn as VkQueueWaitFn
+        queue_idle(queue)
+    }
+}
+
+#[drop(drop_gpu)]
+pub struct Gpu {
+    library: *u8,
+    get_instance: *u8,
+    get_device: *u8,
+    instance: *u8,
+    surface: *u8,
+    physical: *u8,
+    device: *u8,
+    queue: *u8,
+    swapchain: *u8,
+    view0: *u8,
+    view1: *u8,
+    view2: *u8,
+    view3: *u8,
+    fb0: *u8,
+    fb1: *u8,
+    fb2: *u8,
+    fb3: *u8,
+    render_pass: *u8,
+    layout: *u8,
+    pipeline: *u8,
+    vertex_shader: *u8,
+    fragment_shader: *u8,
+    cube_vertex: *u8,
+    cube_fragment: *u8,
+    cube_layout: *u8,
+    cube_pipeline: *u8,
+    depth_image: *u8,
+    depth_memory: *u8,
+    depth_view: *u8,
+    command_pool: *u8,
+    command: *u8,
+    image_available: *u8,
+    render_finished: *u8,
+    acquire: *u8,
+    reset_command: *u8,
+    begin_command: *u8,
+    end_command: *u8,
+    begin_pass: *u8,
+    end_pass: *u8,
+    bind_pipeline: *u8,
+    set_viewport: *u8,
+    set_scissor: *u8,
+    push_constants: *u8,
+    draw_cmd: *u8,
+    submit: *u8,
+    present: *u8,
+    queue_wait: *u8,
+    device_wait: *u8,
+    family: u32,
+    format: u32,
+    width: u32,
+    height: u32,
+    image_count: u32,
+}
+
+fun blank_gpu(library: *u8) -> Gpu {
+    return Gpu {
+        library: library,
+        get_instance: null_handle(),
+        get_device: null_handle(),
+        instance: null_handle(),
+        surface: null_handle(),
+        physical: null_handle(),
+        device: null_handle(),
+        queue: null_handle(),
+        swapchain: null_handle(),
+        view0: null_handle(),
+        view1: null_handle(),
+        view2: null_handle(),
+        view3: null_handle(),
+        fb0: null_handle(),
+        fb1: null_handle(),
+        fb2: null_handle(),
+        fb3: null_handle(),
+        render_pass: null_handle(),
+        layout: null_handle(),
+        pipeline: null_handle(),
+        vertex_shader: null_handle(),
+        fragment_shader: null_handle(),
+        cube_vertex: null_handle(),
+        cube_fragment: null_handle(),
+        cube_layout: null_handle(),
+        cube_pipeline: null_handle(),
+        depth_image: null_handle(),
+        depth_memory: null_handle(),
+        depth_view: null_handle(),
+        command_pool: null_handle(),
+        command: null_handle(),
+        image_available: null_handle(),
+        render_finished: null_handle(),
+        acquire: null_handle(),
+        reset_command: null_handle(),
+        begin_command: null_handle(),
+        end_command: null_handle(),
+        begin_pass: null_handle(),
+        end_pass: null_handle(),
+        bind_pipeline: null_handle(),
+        set_viewport: null_handle(),
+        set_scissor: null_handle(),
+        push_constants: null_handle(),
+        draw_cmd: null_handle(),
+        submit: null_handle(),
+        present: null_handle(),
+        queue_wait: null_handle(),
+        device_wait: null_handle(),
+        family: 0,
+        format: 0,
+        width: 0,
+        height: 0,
+        image_count: 0,
+    }
+}
+
+fun drop_gpu(gpu: Gpu) {
+    mut wait_fn := gpu.device_wait
+    when pointer_is_null(wait_fn) {
+        wait_fn = resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::device_wait_name())
+    }
+    when !pointer_is_null(wait_fn) && !pointer_is_null(gpu.device) {
+        wait: VkDeviceWaitFn = wait_fn as VkDeviceWaitFn
+        wait(gpu.device)
+    }
+    destroy_fb := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_framebuffer_name())
+    destroy_view := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_image_view_name())
+    destroy_swap := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_swapchain_name())
+    destroy_pipe := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_pipeline_name())
+    destroy_layout := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_layout_name())
+    destroy_shader := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_shader_name())
+    destroy_pass := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_render_pass_name())
+    destroy_pool := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_command_pool_name())
+    destroy_sem := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_semaphore_name())
+    destroy_child(destroy_fb, gpu.device, gpu.fb0)
+    destroy_child(destroy_fb, gpu.device, gpu.fb1)
+    destroy_child(destroy_fb, gpu.device, gpu.fb2)
+    destroy_child(destroy_fb, gpu.device, gpu.fb3)
+    destroy_child(destroy_view, gpu.device, gpu.view0)
+    destroy_child(destroy_view, gpu.device, gpu.view1)
+    destroy_child(destroy_view, gpu.device, gpu.view2)
+    destroy_child(destroy_view, gpu.device, gpu.view3)
+    destroy_child(destroy_view, gpu.device, gpu.depth_view)
+    destroy_image := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_image_name())
+    free_memory := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::free_memory_name())
+    destroy_child(destroy_image, gpu.device, gpu.depth_image)
+    destroy_child(free_memory, gpu.device, gpu.depth_memory)
+    destroy_child(destroy_swap, gpu.device, gpu.swapchain)
+    destroy_child(destroy_pipe, gpu.device, gpu.pipeline)
+    destroy_child(destroy_pipe, gpu.device, gpu.cube_pipeline)
+    destroy_child(destroy_layout, gpu.device, gpu.layout)
+    destroy_child(destroy_layout, gpu.device, gpu.cube_layout)
+    destroy_child(destroy_shader, gpu.device, gpu.vertex_shader)
+    destroy_child(destroy_shader, gpu.device, gpu.fragment_shader)
+    destroy_child(destroy_shader, gpu.device, gpu.cube_vertex)
+    destroy_child(destroy_shader, gpu.device, gpu.cube_fragment)
+    destroy_child(destroy_pass, gpu.device, gpu.render_pass)
+    destroy_child(destroy_pool, gpu.device, gpu.command_pool)
+    destroy_child(destroy_sem, gpu.device, gpu.image_available)
+    destroy_child(destroy_sem, gpu.device, gpu.render_finished)
+    destroy_device := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_device_name())
+    when !pointer_is_null(destroy_device) && !pointer_is_null(gpu.device) {
+        destroy: VkDestroyInstanceFn = destroy_device as VkDestroyInstanceFn
+        destroy(gpu.device, null_handle())
+    }
+    when !pointer_is_null(gpu.get_instance) && !pointer_is_null(gpu.instance) {
+        destroy_surface := vk_data::resolve(gpu.get_instance, gpu.instance, vk_data::destroy_surface_name())
+        destroy_child(destroy_surface, gpu.instance, gpu.surface)
+        destroy_instance := vk_data::resolve(gpu.get_instance, gpu.instance, vk_data::destroy_instance_name())
+        when !pointer_is_null(destroy_instance) {
+            destroy: VkDestroyInstanceFn = destroy_instance as VkDestroyInstanceFn
+            destroy(gpu.instance, null_handle())
+        }
+    }
+    when !pointer_is_null(gpu.library) { unload_library(gpu.library) }
+}
+
+#[drop(drop_frame)]
+pub struct Frame {
+    command: *u8,
+    queue: *u8,
+    swapchain: *u8,
+    image_available: *u8,
+    render_finished: *u8,
+    layout: *u8,
+    end_command: *u8,
+    end_pass: *u8,
+    submit: *u8,
+    present: *u8,
+    queue_wait: *u8,
+    push_constants: *u8,
+    draw_cmd: *u8,
+    bind_pipeline: *u8,
+    pipeline: *u8,
+    cube_pipeline: *u8,
+    cube_layout: *u8,
+    image_index: u32,
+    width: u32,
+    height: u32,
+}
+
+fun inert_frame() -> Frame {
+    return Frame {
+        command: null_handle(),
+        queue: null_handle(),
+        swapchain: null_handle(),
+        image_available: null_handle(),
+        render_finished: null_handle(),
+        layout: null_handle(),
+        end_command: null_handle(),
+        end_pass: null_handle(),
+        submit: null_handle(),
+        present: null_handle(),
+        queue_wait: null_handle(),
+        push_constants: null_handle(),
+        draw_cmd: null_handle(),
+        bind_pipeline: null_handle(),
+        pipeline: null_handle(),
+        cube_pipeline: null_handle(),
+        cube_layout: null_handle(),
+        image_index: 0,
+        width: 0,
+        height: 0,
+    }
+}
+
+fun drop_frame(frame: Frame) {
+    when !pointer_is_null(frame.end_pass) {
+        end_pass: VkEndPassFn = frame.end_pass as VkEndPassFn
+        end_pass(frame.command)
+    }
+    when !pointer_is_null(frame.end_command) {
+        end_command: VkEndCmdFn = frame.end_command as VkEndCmdFn
+        end_command(frame.command)
+    }
+    submit_present(
+        frame.queue,
+        frame.command,
+        1,
+        frame.image_available,
+        frame.render_finished,
+        frame.swapchain,
+        frame.image_index,
+        frame.submit,
+        frame.present,
+        frame.queue_wait
+    )
+}
+
+extend Gpu {
+    // Opens a Vulkan device for this Win32 window. Drawing stays on the frames begin() returns.
+    pub fun open(hwnd: *u8) -> Gpu {
+        when pointer_is_null(hwnd) { return blank_gpu(null_handle()) }
+        library := load_library("vulkan-1.dll")
+        when pointer_is_null(library) { return blank_gpu(null_handle()) }
+        mut gpu := blank_gpu(library)
+        gpu.get_instance = load_symbol(gpu.library, "vkGetInstanceProcAddr")
+        when pointer_is_null(gpu.get_instance) { return gpu }
+        gpu.instance = make_instance(gpu.get_instance)
+        when pointer_is_null(gpu.instance) { return gpu }
+        gpu.surface = make_surface(gpu.get_instance, gpu.instance, hwnd)
+        when pointer_is_null(gpu.surface) { return gpu }
+        chosen := choose_device(gpu.get_instance, gpu.instance, gpu.surface, hwnd)
+        when chosen.ok == 0 { return gpu }
+        gpu.physical = chosen.physical
+        gpu.family = chosen.family
+        gpu.format = chosen.format
+        gpu.width = chosen.width
+        gpu.height = chosen.height
+        gpu.device = make_device(gpu.get_instance, gpu.instance, gpu.physical, gpu.family)
+        when pointer_is_null(gpu.device) { return gpu }
+        gpu.get_device = vk_data::resolve(gpu.get_instance, gpu.instance, vk_data::get_device_proc_name())
+        when pointer_is_null(gpu.get_device) { return gpu }
+        get_queue := vk_data::resolve(gpu.get_device, gpu.device, vk_data::get_device_queue_name())
+        gpu.queue = take_queue(get_queue, gpu.device, gpu.family)
+        when pointer_is_null(gpu.queue) { return gpu }
+        procs := load_frame_procs(gpu.get_device, gpu.device)
+        when !procs_ready(procs) { return gpu }
+        gpu.acquire = procs.acquire
+        gpu.reset_command = procs.reset_command
+        gpu.begin_command = procs.begin_command
+        gpu.end_command = procs.end_command
+        gpu.begin_pass = procs.begin_pass
+        gpu.end_pass = procs.end_pass
+        gpu.bind_pipeline = procs.bind_pipeline
+        gpu.set_viewport = procs.set_viewport
+        gpu.set_scissor = procs.set_scissor
+        gpu.push_constants = procs.push_constants
+        gpu.draw_cmd = procs.draw_cmd
+        gpu.submit = procs.submit
+        gpu.present = procs.present
+        gpu.queue_wait = procs.queue_wait
+        gpu.device_wait = procs.device_wait
+        create_swap := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_swapchain_name())
+        images_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::get_swapchain_images_name())
+        view_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_image_view_name())
+        chain := make_swapchain(gpu.device, create_swap, images_fn, view_fn, gpu.surface, chosen)
+        gpu.swapchain = chain.swapchain
+        gpu.view0 = chain.view0
+        gpu.view1 = chain.view1
+        gpu.view2 = chain.view2
+        gpu.view3 = chain.view3
+        gpu.image_count = chain.count
+        when pointer_is_null(gpu.swapchain) || pointer_is_null(gpu.view0) || gpu.image_count == 0 { return gpu }
+        when gpu.image_count > 1 && pointer_is_null(gpu.view1) { return gpu }
+        when gpu.image_count > 2 && pointer_is_null(gpu.view2) { return gpu }
+        when gpu.image_count > 3 && pointer_is_null(gpu.view3) { return gpu }
+        depth := make_depth(gpu.get_instance, gpu.instance, gpu.get_device, gpu.device, gpu.physical, gpu.width, gpu.height)
+        gpu.depth_image = depth.image
+        gpu.depth_memory = depth.memory
+        gpu.depth_view = depth.view
+        when pointer_is_null(gpu.depth_view) { return gpu }
+        create_pass := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_render_pass_name())
+        gpu.render_pass = make_pass(gpu.device, create_pass, gpu.format, depth.format)
+        when pointer_is_null(gpu.render_pass) { return gpu }
+        create_fb := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_framebuffer_name())
+        gpu.fb0 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view0, gpu.depth_view, gpu.width, gpu.height)
+        when gpu.image_count > 1 {
+            gpu.fb1 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view1, gpu.depth_view, gpu.width, gpu.height)
+        }
+        when gpu.image_count > 2 {
+            gpu.fb2 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view2, gpu.depth_view, gpu.width, gpu.height)
+        }
+        when gpu.image_count > 3 {
+            gpu.fb3 = make_framebuffer(gpu.device, create_fb, gpu.render_pass, gpu.view3, gpu.depth_view, gpu.width, gpu.height)
+        }
+        when pointer_is_null(gpu.fb0) { return gpu }
+        when gpu.image_count > 1 && pointer_is_null(gpu.fb1) { return gpu }
+        when gpu.image_count > 2 && pointer_is_null(gpu.fb2) { return gpu }
+        when gpu.image_count > 3 && pointer_is_null(gpu.fb3) { return gpu }
+        create_shader := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_shader_name())
+        gpu.vertex_shader = make_vertex_shader(gpu.device, create_shader)
+        gpu.fragment_shader = make_fragment_shader(gpu.device, create_shader)
+        when pointer_is_null(gpu.vertex_shader) || pointer_is_null(gpu.fragment_shader) { return gpu }
+        layout_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_layout_name())
+        pipeline_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_pipelines_name())
+        bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.vertex_shader, gpu.fragment_shader, 0, 0, 1, 48)
+        gpu.layout = bundle.layout
+        gpu.pipeline = bundle.pipeline
+        when pointer_is_null(gpu.pipeline) || pointer_is_null(gpu.layout) { return gpu }
+        gpu.cube_vertex = make_cube_vertex_shader(gpu.device, create_shader)
+        gpu.cube_fragment = make_cube_fragment_shader(gpu.device, create_shader)
+        when pointer_is_null(gpu.cube_vertex) || pointer_is_null(gpu.cube_fragment) { return gpu }
+        cube_bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.cube_vertex, gpu.cube_fragment, 1, 1, 1, 64)
+        gpu.cube_layout = cube_bundle.layout
+        gpu.cube_pipeline = cube_bundle.pipeline
+        when pointer_is_null(gpu.cube_pipeline) || pointer_is_null(gpu.cube_layout) { return gpu }
+        pool_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_command_pool_name())
+        alloc_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::allocate_commands_name())
+        pool := make_commands(gpu.device, pool_fn, alloc_fn, gpu.family)
+        gpu.command_pool = pool.value
+        when pointer_is_null(gpu.command_pool) { return gpu }
+        gpu.command = allocate_command(gpu.device, alloc_fn, gpu.command_pool)
+        when pointer_is_null(gpu.command) { return gpu }
+        sem_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_semaphore_name())
+        gpu.image_available = make_semaphore(gpu.device, sem_fn)
+        gpu.render_finished = make_semaphore(gpu.device, sem_fn)
+        when pointer_is_null(gpu.image_available) || pointer_is_null(gpu.render_finished) { return gpu }
+        return gpu
+    }
+
+    fun ready(self) -> bool {
+        when pointer_is_null(self.device) || pointer_is_null(self.swapchain) || pointer_is_null(self.command) { return false }
+        when pointer_is_null(self.pipeline) || pointer_is_null(self.cube_pipeline) || pointer_is_null(self.cube_layout) { return false }
+        when pointer_is_null(self.queue) || pointer_is_null(self.render_pass) || pointer_is_null(self.depth_view) { return false }
+        when pointer_is_null(self.image_available) || pointer_is_null(self.render_finished) || pointer_is_null(self.layout) { return false }
+        when pointer_is_null(self.acquire) || pointer_is_null(self.reset_command) || pointer_is_null(self.begin_command) { return false }
+        when pointer_is_null(self.end_command) || pointer_is_null(self.begin_pass) || pointer_is_null(self.end_pass) { return false }
+        when pointer_is_null(self.bind_pipeline) || pointer_is_null(self.set_viewport) || pointer_is_null(self.set_scissor) { return false }
+        when pointer_is_null(self.push_constants) || pointer_is_null(self.draw_cmd) || pointer_is_null(self.submit) { return false }
+        when pointer_is_null(self.present) || pointer_is_null(self.queue_wait) { return false }
+        when self.width == 0 || self.height == 0 || self.image_count == 0 || pointer_is_null(self.fb0) { return false }
+        return true
+    }
+
+    fun consume_semaphore(self, index: u32) {
+        submit_present(
+            self.queue,
+            self.command,
+            0,
+            self.image_available,
+            self.render_finished,
+            self.swapchain,
+            index,
+            self.submit,
+            self.present,
+            self.queue_wait
+        )
+    }
+
+    fun start_pass(self, framebuffer: *u8) -> i32 {
+        mut area := VkRect { x: 0, y: 0, w: self.width, h: self.height }
+        mut clear := VkClearPair {
+            color: VkClear { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            depth: VkClearDepth { depth: 1.0, stencil: 0, pad0: 0, pad1: 0 },
+        }
+        mut info := VkPassBegin {
+            s_type: 43,
+            next: null_handle(),
+            pass: self.render_pass,
+            framebuffer: framebuffer,
+            area: area,
+            clear_count: 2,
+            clears: (&raw clear) as *u8,
+        }
+        call: VkBeginPassFn = self.begin_pass as VkBeginPassFn
+        call(self.command, &raw mut info, 0)
+        return 0
+    }
+
+    fun prepare_draw(self) {
+        mut viewport := VkViewport {
+            x: 0.0,
+            y: 0.0,
+            w: self.width as f32,
+            h: self.height as f32,
+            min_z: 0.0,
+            max_z: 1.0,
+        }
+        set_viewport: VkSetViewportFn = self.set_viewport as VkSetViewportFn
+        set_viewport(self.command, 0, 1, &raw viewport)
+        mut scissor := VkRect { x: 0, y: 0, w: self.width, h: self.height }
+        set_scissor: VkSetScissorFn = self.set_scissor as VkSetScissorFn
+        set_scissor(self.command, 0, 1, &raw scissor)
+        bind: VkBindPipelineFn = self.bind_pipeline as VkBindPipelineFn
+        bind(self.command, 0, self.pipeline)
+    }
+
+    // Acquires one swapchain image. The returned frame presents that image when it drops.
+    pub fun begin(self) -> Frame {
+        when !self.ready() { return inert_frame() }
+        mut index: u32 = 0
+        acquire: VkAcquireFn = self.acquire as VkAcquireFn
+        result := acquire(self.device, self.swapchain, 1000000000, self.image_available, null_handle(), &raw mut index)
+        when result != 0 && result != 1000001003 { return inert_frame() }
+        reset: VkResetCmdFn = self.reset_command as VkResetCmdFn
+        reset(self.command, 0)
+        mut recording: u32 = 0
+        mut started: u32 = 0
+        begin_command: VkBeginCmdFn = self.begin_command as VkBeginCmdFn
+        mut begin_info := VkCommandBegin { s_type: 42, next: null_handle(), flags: 1, inherit: null_handle() }
+        when begin_command(self.command, &raw mut begin_info) == (0 as i32) {
+            recording = 1
+            framebuffer := pick4(index, self.fb0, self.fb1, self.fb2, self.fb3)
+            when !pointer_is_null(framebuffer) {
+                self.start_pass(framebuffer)
+                started = 1
+                self.prepare_draw()
+            }
+        }
+        when recording == 0 {
+            self.consume_semaphore(index)
+            return inert_frame()
+        }
+        mut end_pass_fn := null_handle()
+        when started != 0 { end_pass_fn = self.end_pass }
+        return Frame {
+            command: self.command,
+            queue: self.queue,
+            swapchain: self.swapchain,
+            image_available: self.image_available,
+            render_finished: self.render_finished,
+            layout: self.layout,
+            end_command: self.end_command,
+            end_pass: end_pass_fn,
+            submit: self.submit,
+            present: self.present,
+            queue_wait: self.queue_wait,
+            push_constants: self.push_constants,
+            draw_cmd: self.draw_cmd,
+            bind_pipeline: self.bind_pipeline,
+            pipeline: self.pipeline,
+            cube_pipeline: self.cube_pipeline,
+            cube_layout: self.cube_layout,
+            image_index: index,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+extend Frame {
+    fun draw_shape(self, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32, mode: f32) {
+        when pointer_is_null(self.command) || pointer_is_null(self.push_constants) || pointer_is_null(self.draw_cmd) { return }
+        when pointer_is_null(self.layout) || pointer_is_null(self.pipeline) || pointer_is_null(self.bind_pipeline) { return }
+        when w <= 0.0 || h <= 0.0 { return }
+        shape_bind: VkBindPipelineFn = self.bind_pipeline as VkBindPipelineFn
+        shape_bind(self.command, 0, self.pipeline)
+        mut push := VkPush {
+            ox: x,
+            oy: y,
+            sx: w,
+            sy: h,
+            cr: channel(color.r),
+            cg: channel(color.g),
+            cb: channel(color.b),
+            ca: channel(color.a),
+            vw: self.width as f32,
+            vh: self.height as f32,
+            radius: radius,
+            mode: mode,
+        }
+        push_cmd: VkPushCmdFn = self.push_constants as VkPushCmdFn
+        push_cmd(self.command, self.layout, 17, 0, 48, (&raw push) as *u8)
+        draw: VkDrawFn = self.draw_cmd as VkDrawFn
+        draw(self.command, 6, 1, 0, 0)
+    }
+
+    pub fun clear(self, color: Color) {
+        when self.width == 0 || self.height == 0 { return }
+        self.draw_shape(0.0, 0.0, self.width as f32, self.height as f32, color, 0.0, 0.0)
+    }
+
+    pub fun fill_rect(self, x: i32, y: i32, width: i32, height: i32, color: Color) {
+        when width <= 0 || height <= 0 { return }
+        self.draw_shape(x as f32, y as f32, width as f32, height as f32, color, 0.0, 0.0)
+    }
+
+    pub fun fill_circle(self, x: i32, y: i32, radius: i32, color: Color) {
+        when radius <= 0 { return }
+        self.draw_shape(
+            (x - radius) as f32,
+            (y - radius) as f32,
+            (radius * 2) as f32,
+            (radius * 2) as f32,
+            color,
+            radius as f32,
+            1.0
+        )
+    }
+
+    // Draws one cube. center is the middle, size is the full width on each axis, and yaw spins it around Y.
+    pub fun draw_cube(self, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32) {
+        when pointer_is_null(self.command) || pointer_is_null(self.cube_pipeline) || pointer_is_null(self.cube_layout) { return }
+        when pointer_is_null(self.push_constants) || pointer_is_null(self.draw_cmd) || pointer_is_null(self.bind_pipeline) { return }
+        when self.width == 0 || self.height == 0 || size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 { return }
+        aspect := (self.width as f32) / (self.height as f32)
+        model := math::Mat4::translation(center.x, center.y, center.z).mul(math::Mat4::rotation_y(yaw).mul(math::Mat4::scale(size.x, size.y, size.z)))
+        view := math::Mat4::look_at(camera.eye, camera.target, camera.up)
+        mut push := math::Mat4::perspective(camera.fov_degrees, aspect, 0.1, 100.0).mul(view.mul(model))
+        cube_bind: VkBindPipelineFn = self.bind_pipeline as VkBindPipelineFn
+        cube_bind(self.command, 0, self.cube_pipeline)
+        push_cmd: VkPushCmdFn = self.push_constants as VkPushCmdFn
+        push_cmd(self.command, self.cube_layout, 17, 0, 64, (&raw push) as *u8)
+        draw: VkDrawFn = self.draw_cmd as VkDrawFn
+        draw(self.command, 36, 1, 0, 0)
+    }
+}

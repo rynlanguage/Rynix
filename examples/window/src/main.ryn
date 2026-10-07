@@ -1,0 +1,70 @@
+use rynix::graphics
+use rynix::math
+use rynix::three_d
+use rynix::window
+
+fun main() {
+    mut window := window::Window::open(1280, 720, "Rynix")
+    when !window.is_open() { return }
+    mut gpu := graphics::Gpu::open(window.native_handle())
+    mut camera := three_d::Camera::new(
+        math::Vec3::new(3.2, 2.4, 4.2),
+        math::Vec3::new(0.0, 0.2, 0.0),
+        math::Vec3::new(0.0, 1.0, 0.0),
+        45.0
+    )
+    // Opening aim is the eye above, looking at (0, 0.2, 0). from_angles is the only facing vector:
+    // yaw turns around Y, pitch rises from the horizon, and strafe uses that same flat direction.
+    mut look_yaw: f32 = 0.0 - 2.4905159321453136
+    mut look_pitch: f32 = 0.0 - 0.39478093214777676
+    pitch_limit: f32 = 1.4
+    look_speed: f32 = 0.004
+    mut spin: f32 = 0.8
+    mut last_x: i32 = 0
+    mut last_y: i32 = 0
+    mut looking: bool = false
+    while window.poll_events_for(16) {
+        when window.key_down(window::KeyCode::ESCAPE) { window.close() }
+        x := window.mouse_x()
+        y := window.mouse_y()
+        dx := (x - last_x) as f32
+        dy := (y - last_y) as f32
+        when window.mouse_down(window::MouseButton::RIGHT) {
+            when looking {
+                look_yaw = look_yaw - dx * look_speed
+                look_pitch = look_pitch - dy * look_speed
+                when look_pitch > pitch_limit { look_pitch = pitch_limit }
+                when look_pitch < (0.0 as f32) - pitch_limit {
+                    look_pitch = (0.0 as f32) - pitch_limit
+                }
+            }
+            looking = true
+        } else {
+            looking = false
+        }
+        last_x = x
+        last_y = y
+        flat := math::Vec3::from_angles(look_yaw, 0.0)
+        right := math::Vec3::new(0.0 - flat.z, 0.0, flat.x)
+        mut step := math::Vec3::new(0.0, 0.0, 0.0)
+        when window.key_down(window::KeyCode::W) { step = step.add(flat) }
+        when window.key_down(window::KeyCode::S) { step = step.sub(flat) }
+        when window.key_down(window::KeyCode::D) { step = step.add(right) }
+        when window.key_down(window::KeyCode::A) { step = step.sub(right) }
+        when window.key_down(window::KeyCode::SPACE) { step = step.add(math::Vec3::new(0.0, 1.0, 0.0)) }
+        when window.key_down(window::KeyCode::CONTROL) {
+            step = step.add(math::Vec3::new(0.0, 0.0 - 1.0, 0.0))
+        }
+        mut speed: f32 = 0.1
+        when window.key_down(window::KeyCode::SHIFT) { speed = 0.3 }
+        when step.length_squared() > (0.0 as f32) {
+            camera.move_by(step.normalized().mul(speed))
+        }
+        camera.look_toward(math::Vec3::from_angles(look_yaw, look_pitch))
+        frame := gpu.begin()
+        frame.clear(math::Color::rgb(18, 22, 34))
+        frame.draw_cube(camera, math::Vec3::new(0.0, -0.56, 0.0), math::Vec3::new(5.0, 0.1, 5.0), 0.0)
+        frame.draw_cube(camera, math::Vec3::new(0.0, 0.0, 0.0), math::Vec3::new(1.0, 1.0, 1.0), spin)
+        spin = spin + (0.02 as f32)
+    }
+}

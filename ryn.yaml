@@ -1,6 +1,6 @@
 name: rynix
 version: 0.1.0
-owner: rynix
+owner: v3nn7
 dependencies: {}
 build:
   optimize: speed

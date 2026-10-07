@@ -1,0 +1,24 @@
+use rynix::window
+
+fun main() -> i32 {
+    mut window := window::Window::open(640, 480, "Rynix window smoke")
+    when !window.is_open() { return 1 }
+    when !window.poll_events() { return 7 }
+    when window.width() != (640 as u32) || window.height() != (480 as u32) { return 2 }
+    when !window.set_title("Rynix żółć 🚀 smoke passed") { return 3 }
+    when !window.set_size(800, 600) { return 4 }
+    when window.width() != (800 as u32) || window.height() != (600 as u32) { return 5 }
+    key_is_down := window.key_down(window::KeyCode::ESCAPE)
+    key_was_pressed := window.key_pressed(window::KeyCode::ESCAPE)
+    left_is_down := window.mouse_down(window::MouseButton::LEFT)
+    left_was_pressed := window.mouse_pressed(window::MouseButton::LEFT)
+    cursor_x := window.mouse_x()
+    cursor_y := window.mouse_y()
+    window.close()
+    when window.is_open() { return 6 }
+    second := window::Window::open(320, 240, "Rynix second window")
+    when !second.is_open() { return 8 }
+    when second.width() != (320 as u32) || second.height() != (240 as u32) { return 9 }
+    second.close()
+    return 0
+}

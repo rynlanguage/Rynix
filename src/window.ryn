@@ -1,1 +1,490 @@
-// Window creation is intentionally deferred until a supported platform FFI is selected.
+// Native Windows windowing through Ryn's typed dynamic FFI.
+// Win32 ABI records and handles are private implementation details.
+type WideData = [u16; 128]
+type ClassData = [u16; 16]
+
+#[repr(C)]
+struct WideText { data: WideData }
+#[repr(C)]
+struct ClassName { data: ClassData }
+#[repr(C)]
+struct Point { x: i32, y: i32 }
+#[repr(C)]
+struct Rect { left: i32, top: i32, right: i32, bottom: i32 }
+#[repr(C)]
+struct Message {
+    hwnd: *u8,
+    message: u32,
+    w_param: u64,
+    l_param: i64,
+    time: u32,
+    point: Point,
+    private: u32,
+}
+type WindowProcedure = extern "C" fun(*u8, u32, u64, i64) -> i64
+#[repr(C)]
+struct WindowClass {
+    size: u32,
+    style: u32,
+    window_proc: WindowProcedure,
+    class_extra: i32,
+    window_extra: i32,
+    instance: *u8,
+    icon: *u8,
+    cursor: *u8,
+    background: *u8,
+    menu_name: *u8,
+    class_name: *ClassName,
+    small_icon: *u8,
+}
+type GetModuleHandleFn = extern "C" fun(*u8) -> *u8
+type RegisterClassFn = extern "C" fun(*WindowClass) -> u16
+type GetLastErrorFn = extern "C" fun() -> u32
+type SetLastErrorFn = extern "C" fun(u32)
+type AdjustWindowRectFn = extern "C" fun(*Rect, u32, i32, u32) -> i32
+type CreateWindowFn = extern "C" fun(u32, *ClassName, *WideText, u32, i32, i32, i32, i32, *u8, *u8, *u8, *u8) -> *u8
+type ShowWindowFn = extern "C" fun(*u8, i32) -> i32
+type UpdateWindowFn = extern "C" fun(*u8) -> i32
+type IsWindowFn = extern "C" fun(*u8) -> i32
+type DestroyWindowFn = extern "C" fun(*u8) -> i32
+type PeekMessageFn = extern "C" fun(*Message, *u8, u32, u32, u32) -> i32
+type TranslateMessageFn = extern "C" fun(*Message) -> i32
+type DispatchMessageFn = extern "C" fun(*Message) -> i64
+type GetClientRectFn = extern "C" fun(*u8, *Rect) -> i32
+type SetWindowTextFn = extern "C" fun(*u8, *WideText) -> i32
+type SetWindowPosFn = extern "C" fun(*u8, *u8, i32, i32, i32, i32, u32) -> i32
+type GetAsyncKeyStateFn = extern "C" fun(i32) -> i16
+type GetCursorPosFn = extern "C" fun(*Point) -> i32
+type ScreenToClientFn = extern "C" fun(*u8, *Point) -> i32
+type LoadCursorFn = extern "C" fun(*u8, *u8) -> *u8
+type SetCursorFn = extern "C" fun(*u8) -> *u8
+type MsgWaitFn = extern "C" fun(u32, *u8, i32, u32, u32) -> u32
+
+// WM_CLOSE is swallowed. The title-bar button and Alt+F4 do not destroy the window;
+// Window.close posts the destroy through the cached DestroyWindow pointer.
+fun rynix_window_proc(hwnd: *u8, message: u32, w_param: u64, l_param: i64) -> i64 {
+    when message == (16 as u32) { return 0 }
+    user32 := load_library("user32.dll")
+    when pointer_is_null(user32) { return 0 }
+    def_proc: WindowProcedure = load_symbol(user32, "DefWindowProcW") as WindowProcedure
+    when pointer_is_null(def_proc as *u8) {
+        unload_library(user32)
+        return 0
+    }
+    result := def_proc(hwnd, message, w_param, l_param)
+    unload_library(user32)
+    return result
+}
+
+fun has_symbol(library: *u8, name: str) -> bool {
+    return !pointer_is_null(load_symbol(library, name))
+}
+
+fun encode_title(value: str) -> WideText {
+    mut data: WideData = [0; 128]
+    text := String(value)
+    mut unit: u64 = 0
+    mut byte_index: u64 = 0
+    while byte_index < text.len() {
+        first := text.byte_at(byte_index) as u32
+        mut scalar: u32 = 0
+        when first < 128 {
+            scalar = first
+            byte_index += 1
+        } else when first < 224 {
+            second := text.byte_at(byte_index + 1) as u32
+            scalar = ((first & 31) << 6) | (second & 63)
+            byte_index += 2
+        } else when first < 240 {
+            second := text.byte_at(byte_index + 1) as u32
+            third := text.byte_at(byte_index + 2) as u32
+            scalar = ((first & 15) << 12) | ((second & 63) << 6) | (third & 63)
+            byte_index += 3
+        } else {
+            second := text.byte_at(byte_index + 1) as u32
+            third := text.byte_at(byte_index + 2) as u32
+            fourth := text.byte_at(byte_index + 3) as u32
+            scalar = ((first & 7) << 18) | ((second & 63) << 12) | ((third & 63) << 6) | (fourth & 63)
+            byte_index += 4
+        }
+        when scalar == (0 as u32) { return WideText { data: data } }
+        when scalar <= 65535 {
+            when unit < 127 {
+                data[unit] = scalar as u16
+                unit += 1
+            }
+        } else {
+            when unit < 126 {
+                adjusted := scalar - 65536
+                data[unit] = (55296 + (adjusted >> 10)) as u16
+                data[unit + 1] = (56320 + (adjusted & 1023)) as u16
+                unit += 2
+            }
+        }
+    }
+    return WideText { data: data }
+}
+
+#[derive(Clone, Eq)]
+pub struct KeyCode { code: u32 }
+
+extend KeyCode {
+    pub fun from_virtual_key(code: u32) -> KeyCode => KeyCode { code: code }
+    pub const A: KeyCode = KeyCode { code: 65 }
+    pub const B: KeyCode = KeyCode { code: 66 }
+    pub const C: KeyCode = KeyCode { code: 67 }
+    pub const D: KeyCode = KeyCode { code: 68 }
+    pub const E: KeyCode = KeyCode { code: 69 }
+    pub const F: KeyCode = KeyCode { code: 70 }
+    pub const G: KeyCode = KeyCode { code: 71 }
+    pub const H: KeyCode = KeyCode { code: 72 }
+    pub const I: KeyCode = KeyCode { code: 73 }
+    pub const J: KeyCode = KeyCode { code: 74 }
+    pub const K: KeyCode = KeyCode { code: 75 }
+    pub const L: KeyCode = KeyCode { code: 76 }
+    pub const M: KeyCode = KeyCode { code: 77 }
+    pub const N: KeyCode = KeyCode { code: 78 }
+    pub const O: KeyCode = KeyCode { code: 79 }
+    pub const P: KeyCode = KeyCode { code: 80 }
+    pub const Q: KeyCode = KeyCode { code: 81 }
+    pub const R: KeyCode = KeyCode { code: 82 }
+    pub const S: KeyCode = KeyCode { code: 83 }
+    pub const T: KeyCode = KeyCode { code: 84 }
+    pub const U: KeyCode = KeyCode { code: 85 }
+    pub const V: KeyCode = KeyCode { code: 86 }
+    pub const W: KeyCode = KeyCode { code: 87 }
+    pub const X: KeyCode = KeyCode { code: 88 }
+    pub const Y: KeyCode = KeyCode { code: 89 }
+    pub const Z: KeyCode = KeyCode { code: 90 }
+    pub const ESCAPE: KeyCode = KeyCode { code: 27 }
+    pub const ENTER: KeyCode = KeyCode { code: 13 }
+    pub const SPACE: KeyCode = KeyCode { code: 32 }
+    pub const TAB: KeyCode = KeyCode { code: 9 }
+    pub const BACKSPACE: KeyCode = KeyCode { code: 8 }
+    pub const LEFT: KeyCode = KeyCode { code: 37 }
+    pub const UP: KeyCode = KeyCode { code: 38 }
+    pub const RIGHT: KeyCode = KeyCode { code: 39 }
+    pub const DOWN: KeyCode = KeyCode { code: 40 }
+    pub const SHIFT: KeyCode = KeyCode { code: 16 }
+    pub const CONTROL: KeyCode = KeyCode { code: 17 }
+    pub const ALT: KeyCode = KeyCode { code: 18 }
+}
+
+#[derive(Clone, Eq)]
+pub struct MouseButton { code: u32 }
+
+extend MouseButton {
+    pub const LEFT: MouseButton = MouseButton { code: 1 }
+    pub const RIGHT: MouseButton = MouseButton { code: 2 }
+    pub const MIDDLE: MouseButton = MouseButton { code: 4 }
+}
+
+#[drop(drop_window)]
+pub struct Window {
+    handle: *u8,
+    user32: *u8,
+    // Stable null. PeekMessage must not reuse message.hwnd: that field becomes
+    // the window from the previous message and then hides thread messages such as WM_QUIT.
+    null_pointer: *u8,
+    peek_message: *u8,
+    translate_message: *u8,
+    dispatch_message: *u8,
+    is_window: *u8,
+    destroy_window: *u8,
+    client_rect: *u8,
+    adjust_rect: *u8,
+    set_window_pos: *u8,
+    set_window_text: *u8,
+    async_key_state: *u8,
+    cursor_pos: *u8,
+    screen_to_client: *u8,
+    wait_message: *u8,
+}
+
+fun user32_ready(user32: *u8) -> bool {
+    return has_symbol(user32, "RegisterClassExW")
+        && has_symbol(user32, "CreateWindowExW")
+        && has_symbol(user32, "AdjustWindowRectEx")
+        && has_symbol(user32, "ShowWindow")
+        && has_symbol(user32, "UpdateWindow")
+        && has_symbol(user32, "DefWindowProcW")
+        && has_symbol(user32, "IsWindow")
+        && has_symbol(user32, "DestroyWindow")
+        && has_symbol(user32, "PeekMessageW")
+        && has_symbol(user32, "TranslateMessage")
+        && has_symbol(user32, "DispatchMessageW")
+        && has_symbol(user32, "GetClientRect")
+        && has_symbol(user32, "SetWindowPos")
+        && has_symbol(user32, "SetWindowTextW")
+        && has_symbol(user32, "GetAsyncKeyState")
+        && has_symbol(user32, "GetCursorPos")
+        && has_symbol(user32, "ScreenToClient")
+        && has_symbol(user32, "LoadCursorW")
+        && has_symbol(user32, "SetCursor")
+        && has_symbol(user32, "MsgWaitForMultipleObjects")
+}
+
+fun inert_window(null_handle: *u8) -> Window {
+    return Window {
+        handle: null_handle,
+        user32: null_handle,
+        null_pointer: null_handle,
+        peek_message: null_handle,
+        translate_message: null_handle,
+        dispatch_message: null_handle,
+        is_window: null_handle,
+        destroy_window: null_handle,
+        client_rect: null_handle,
+        adjust_rect: null_handle,
+        set_window_pos: null_handle,
+        set_window_text: null_handle,
+        async_key_state: null_handle,
+        cursor_pos: null_handle,
+        screen_to_client: null_handle,
+        wait_message: null_handle,
+    }
+}
+
+fun drop_window(window: Window) {
+    when !pointer_is_null(window.handle) && !pointer_is_null(window.is_window) && !pointer_is_null(window.destroy_window) {
+        is_window: IsWindowFn = window.is_window as IsWindowFn
+        when is_window(window.handle) != (0 as i32) {
+            destroy: DestroyWindowFn = window.destroy_window as DestroyWindowFn
+            destroy(window.handle)
+        }
+    }
+    when !pointer_is_null(window.user32) { unload_library(window.user32) }
+}
+
+fun release_libraries(user32: *u8) {
+    when !pointer_is_null(user32) { unload_library(user32) }
+}
+
+extend Window {
+    // Creates a resizable Win32 window. Width and height describe the client area.
+    pub fun open(width: u32, height: u32, title: str) -> Window {
+        user32 := load_library("user32.dll")
+        kernel32 := load_library("kernel32.dll")
+        null_handle := load_symbol(user32, "RynixNullPointerSentinel")
+        when pointer_is_null(user32) || pointer_is_null(kernel32) || width == (0 as u32) || height == (0 as u32) {
+            release_libraries(user32)
+            when !pointer_is_null(kernel32) { unload_library(kernel32) }
+            return inert_window(null_handle)
+        }
+        when !user32_ready(user32) {
+            release_libraries(user32)
+            unload_library(kernel32)
+            return inert_window(null_handle)
+        }
+
+        get_module: GetModuleHandleFn = load_symbol(kernel32, "GetModuleHandleW") as GetModuleHandleFn
+        instance := get_module(null_handle)
+        when pointer_is_null(instance) {
+            release_libraries(user32)
+            unload_library(kernel32)
+            return inert_window(null_handle)
+        }
+
+        mut class_name := ClassName { data: [82, 121, 110, 105, 120, 87, 105, 110, 100, 111, 119, 0, 0, 0, 0, 0] }
+        mut title_wide := encode_title(title)
+        procedure: WindowProcedure = rynix_window_proc as WindowProcedure
+        // IDC_ARROW is 32512. A null class cursor leaves the spinning startup ball.
+        load_cursor: LoadCursorFn = load_symbol(user32, "LoadCursorW") as LoadCursorFn
+        arrow := load_cursor(null_handle, 32512 as *u8)
+        mut class := WindowClass {
+            size: sizeof(WindowClass) as u32,
+            style: 3,
+            window_proc: procedure,
+            class_extra: 0,
+            window_extra: 0,
+            instance: instance,
+            icon: null_handle,
+            cursor: arrow,
+            background: null_handle,
+            menu_name: null_handle,
+            class_name: &raw mut class_name,
+            small_icon: null_handle
+        }
+        register: RegisterClassFn = load_symbol(user32, "RegisterClassExW") as RegisterClassFn
+        get_last_error: GetLastErrorFn = load_symbol(kernel32, "GetLastError") as GetLastErrorFn
+        set_last_error: SetLastErrorFn = load_symbol(kernel32, "SetLastError") as SetLastErrorFn
+        set_last_error(0)
+        atom := register(&raw mut class)
+        register_error := get_last_error()
+        when atom == (0 as u16) && register_error != 1410 {
+            release_libraries(user32)
+            unload_library(kernel32)
+            return inert_window(null_handle)
+        }
+
+        mut rect := Rect { left: 0, top: 0, right: width as i32, bottom: height as i32 }
+        adjust: AdjustWindowRectFn = load_symbol(user32, "AdjustWindowRectEx") as AdjustWindowRectFn
+        adjust_result := adjust(&raw mut rect, 13565952, 0, 0)
+        when adjust_result == (0 as i32) {
+            release_libraries(user32)
+            unload_library(kernel32)
+            return inert_window(null_handle)
+        }
+
+        create: CreateWindowFn = load_symbol(user32, "CreateWindowExW") as CreateWindowFn
+        handle := create(
+            0, &raw mut class_name, &raw mut title_wide, 13565952,
+            -2147483648, -2147483648, rect.right - rect.left, rect.bottom - rect.top,
+            null_handle, null_handle, instance, null_handle
+        )
+        when pointer_is_null(handle) {
+            release_libraries(user32)
+            unload_library(kernel32)
+            return inert_window(null_handle)
+        }
+        show: ShowWindowFn = load_symbol(user32, "ShowWindow") as ShowWindowFn
+        update: UpdateWindowFn = load_symbol(user32, "UpdateWindow") as UpdateWindowFn
+        show(handle, 5)
+        update(handle)
+        set_cursor: SetCursorFn = load_symbol(user32, "SetCursor") as SetCursorFn
+        when !pointer_is_null(arrow) { set_cursor(arrow) }
+        unload_library(kernel32)
+        return Window {
+            handle: handle,
+            user32: user32,
+            null_pointer: null_handle,
+            peek_message: load_symbol(user32, "PeekMessageW"),
+            translate_message: load_symbol(user32, "TranslateMessage"),
+            dispatch_message: load_symbol(user32, "DispatchMessageW"),
+            is_window: load_symbol(user32, "IsWindow"),
+            destroy_window: load_symbol(user32, "DestroyWindow"),
+            client_rect: load_symbol(user32, "GetClientRect"),
+            adjust_rect: load_symbol(user32, "AdjustWindowRectEx"),
+            set_window_pos: load_symbol(user32, "SetWindowPos"),
+            set_window_text: load_symbol(user32, "SetWindowTextW"),
+            async_key_state: load_symbol(user32, "GetAsyncKeyState"),
+            cursor_pos: load_symbol(user32, "GetCursorPos"),
+            screen_to_client: load_symbol(user32, "ScreenToClient"),
+            wait_message: load_symbol(user32, "MsgWaitForMultipleObjects"),
+        }
+    }
+
+    // Waits until a thread message arrives or the timeout elapses, then pumps.
+    // A plain sleep on this thread makes Windows keep the spinning busy cursor.
+    pub fun poll_events_for(self, timeout_ms: u32) -> bool {
+        when !pointer_is_null(self.wait_message) {
+            wait: MsgWaitFn = self.wait_message as MsgWaitFn
+            wait(0, self.null_pointer, 0, timeout_ms, 1279)
+        }
+        return self.poll_events()
+    }
+
+    // Pumps every message for this thread. The window filter stays null so WM_QUIT is not skipped.
+    pub fun poll_events(self) -> bool {
+        when !self.is_open() { return false }
+        when pointer_is_null(self.peek_message) || pointer_is_null(self.translate_message) || pointer_is_null(self.dispatch_message) {
+            return false
+        }
+        peek: PeekMessageFn = self.peek_message as PeekMessageFn
+        translate: TranslateMessageFn = self.translate_message as TranslateMessageFn
+        dispatch: DispatchMessageFn = self.dispatch_message as DispatchMessageFn
+        mut message := Message {
+            hwnd: self.null_pointer, message: 0, w_param: 0,
+            l_param: 0, time: 0, point: Point { x: 0, y: 0 }, private: 0
+        }
+        while peek(&raw mut message, self.null_pointer, 0, 0, 1) != (0 as i32) {
+            when message.message == 18 { return false }
+            translate(&raw mut message)
+            dispatch(&raw mut message)
+        }
+        return self.is_open()
+    }
+
+    pub fun is_open(self) -> bool {
+        when pointer_is_null(self.handle) || pointer_is_null(self.is_window) { return false }
+        is_window: IsWindowFn = self.is_window as IsWindowFn
+        return is_window(self.handle) != (0 as i32)
+    }
+
+    // Destroys the native window now. Drop checks IsWindow, so this is not destroyed twice.
+    pub fun close(self) {
+        when self.is_open() {
+            destroy: DestroyWindowFn = self.destroy_window as DestroyWindowFn
+            destroy(self.handle)
+        }
+    }
+
+    pub fun native_handle(self) -> *u8 { return self.handle }
+
+    pub fun width(self) -> u32 {
+        when !self.is_open() { return 0 }
+        get_rect: GetClientRectFn = self.client_rect as GetClientRectFn
+        mut rect := Rect { left: 0, top: 0, right: 0, bottom: 0 }
+        when get_rect(self.handle, &raw mut rect) == (0 as i32) { return 0 }
+        return (rect.right - rect.left) as u32
+    }
+
+    pub fun height(self) -> u32 {
+        when !self.is_open() { return 0 }
+        get_rect: GetClientRectFn = self.client_rect as GetClientRectFn
+        mut rect := Rect { left: 0, top: 0, right: 0, bottom: 0 }
+        when get_rect(self.handle, &raw mut rect) == (0 as i32) { return 0 }
+        return (rect.bottom - rect.top) as u32
+    }
+
+    pub fun set_size(self, width: u32, height: u32) -> bool {
+        when !self.is_open() || width == (0 as u32) || height == (0 as u32) { return false }
+        adjust: AdjustWindowRectFn = self.adjust_rect as AdjustWindowRectFn
+        set_position: SetWindowPosFn = self.set_window_pos as SetWindowPosFn
+        mut rect := Rect { left: 0, top: 0, right: width as i32, bottom: height as i32 }
+        when adjust(&raw mut rect, 13565952, 0, 0) == (0 as i32) { return false }
+        return set_position(self.handle, self.null_pointer, 0, 0, rect.right - rect.left, rect.bottom - rect.top, 22) != (0 as i32)
+    }
+
+    pub fun set_title(self, title: str) -> bool {
+        when !self.is_open() { return false }
+        wide := encode_title(title)
+        set_text: SetWindowTextFn = self.set_window_text as SetWindowTextFn
+        return set_text(self.handle, &raw mut wide) != (0 as i32)
+    }
+
+    pub fun key_down(self, key: KeyCode) -> bool {
+        when !self.is_open() { return false }
+        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
+        return state(key.code as i32) < (0 as i16)
+    }
+
+    // Windows' low transition bit is opportunistic; use key_down for continuous state.
+    pub fun key_pressed(self, key: KeyCode) -> bool {
+        when !self.is_open() { return false }
+        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
+        return (state(key.code as i32) as u16 & 1) != (0 as u16)
+    }
+
+    pub fun mouse_down(self, button: MouseButton) -> bool {
+        when !self.is_open() { return false }
+        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
+        return state(button.code as i32) < (0 as i16)
+    }
+
+    pub fun mouse_pressed(self, button: MouseButton) -> bool {
+        when !self.is_open() { return false }
+        state: GetAsyncKeyStateFn = self.async_key_state as GetAsyncKeyStateFn
+        return (state(button.code as i32) as u16 & 1) != (0 as u16)
+    }
+
+    pub fun mouse_x(self) -> i32 {
+        when !self.is_open() { return 0 }
+        get_cursor: GetCursorPosFn = self.cursor_pos as GetCursorPosFn
+        to_client: ScreenToClientFn = self.screen_to_client as ScreenToClientFn
+        mut point := Point { x: 0, y: 0 }
+        when get_cursor(&raw mut point) == (0 as i32) { return 0 }
+        when to_client(self.handle, &raw mut point) == (0 as i32) { return 0 }
+        return point.x
+    }
+
+    pub fun mouse_y(self) -> i32 {
+        when !self.is_open() { return 0 }
+        get_cursor: GetCursorPosFn = self.cursor_pos as GetCursorPosFn
+        to_client: ScreenToClientFn = self.screen_to_client as ScreenToClientFn
+        mut point := Point { x: 0, y: 0 }
+        when get_cursor(&raw mut point) == (0 as i32) { return 0 }
+        when to_client(self.handle, &raw mut point) == (0 as i32) { return 0 }
+        return point.y
+    }
+}

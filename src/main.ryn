@@ -1,10 +1,10 @@
-use math
+use rynix::math
 use core
 use graphics
 use window
 use input
 use audio
-use three_d
+use rynix::three_d
 
 fun main() {
     point := math::Vec3::new(1.0, 2.0, 3.0)

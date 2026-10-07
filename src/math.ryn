@@ -35,6 +35,22 @@ extend Vec3 {
     pub fun length(self) -> f32 => math::sqrt(self.length_squared() as f64) as f32
     pub fun normalized(self) -> Vec3 => Vec3::new(self.x / self.length(), self.y / self.length(), self.z / self.length())
 
+    // Yaw turns around Y. Pitch rises from the horizontal plane. The result has length 1.
+    pub fun from_angles(yaw: f32, pitch: f32) -> Vec3 {
+        yaw_sin := math::sin(yaw as f64) as f32
+        yaw_cos := math::cos(yaw as f64) as f32
+        pitch_sin := math::sin(pitch as f64) as f32
+        pitch_cos := math::cos(pitch as f64) as f32
+        return Vec3::new(yaw_sin * pitch_cos, pitch_sin, yaw_cos * pitch_cos)
+    }
+    pub fun try_normalized(self) -> Option<Vec3> {
+        length := self.length()
+        when length == 0.0 {
+            return Option::None
+        }
+        return Option::Some(Vec3::new(self.x / length, self.y / length, self.z / length))
+    }
+
     pub fun add(self, rhs: Vec3) -> Vec3 => Vec3::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
     pub fun sub(self, rhs: Vec3) -> Vec3 => Vec3::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
     pub fun mul(self, scale: f32) -> Vec3 => Vec3::new(self.x * scale, self.y * scale, self.z * scale)
@@ -76,4 +92,97 @@ extend Color {
     pub const RED: Color = Color { r: 230, g: 41, b: 55, a: 255 }
     pub const GREEN: Color = Color { r: 0, g: 228, b: 48, a: 255 }
     pub const BLUE: Color = Color { r: 0, g: 121, b: 241, a: 255 }
+}
+
+// Column-major 4x4. c0..c3 are the first column.
+#[repr(C)]
+pub struct Mat4 {
+    pub c0: f32, pub c1: f32, pub c2: f32, pub c3: f32,
+    pub c4: f32, pub c5: f32, pub c6: f32, pub c7: f32,
+    pub c8: f32, pub c9: f32, pub c10: f32, pub c11: f32,
+    pub c12: f32, pub c13: f32, pub c14: f32, pub c15: f32,
+}
+
+extend Mat4 {
+    pub fun identity() -> Mat4 => Mat4 {
+        c0: 1.0, c1: 0.0, c2: 0.0, c3: 0.0,
+        c4: 0.0, c5: 1.0, c6: 0.0, c7: 0.0,
+        c8: 0.0, c9: 0.0, c10: 1.0, c11: 0.0,
+        c12: 0.0, c13: 0.0, c14: 0.0, c15: 1.0,
+    }
+
+    pub fun translation(x: f32, y: f32, z: f32) -> Mat4 => Mat4 {
+        c0: 1.0, c1: 0.0, c2: 0.0, c3: 0.0,
+        c4: 0.0, c5: 1.0, c6: 0.0, c7: 0.0,
+        c8: 0.0, c9: 0.0, c10: 1.0, c11: 0.0,
+        c12: x, c13: y, c14: z, c15: 1.0,
+    }
+
+    pub fun scale(x: f32, y: f32, z: f32) -> Mat4 => Mat4 {
+        c0: x, c1: 0.0, c2: 0.0, c3: 0.0,
+        c4: 0.0, c5: y, c6: 0.0, c7: 0.0,
+        c8: 0.0, c9: 0.0, c10: z, c11: 0.0,
+        c12: 0.0, c13: 0.0, c14: 0.0, c15: 1.0,
+    }
+
+    pub fun rotation_y(radians: f32) -> Mat4 {
+        sine := math::sin(radians as f64) as f32
+        cosine := math::cos(radians as f64) as f32
+        return Mat4 {
+            c0: cosine, c1: 0.0, c2: 0.0 - sine, c3: 0.0,
+            c4: 0.0, c5: 1.0, c6: 0.0, c7: 0.0,
+            c8: sine, c9: 0.0, c10: cosine, c11: 0.0,
+            c12: 0.0, c13: 0.0, c14: 0.0, c15: 1.0,
+        }
+    }
+
+    pub fun perspective(fov_degrees: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+        when aspect == 0.0 || near == far { return Mat4::identity() }
+        half := fov_degrees * (3.14159265 as f32) / (360.0 as f32)
+        focal := (1.0 as f32) / (math::tan(half as f64) as f32)
+        vertical := 0.0 - focal
+        depth := far / (near - far)
+        span := near * far / (near - far)
+        return Mat4 {
+            c0: focal / aspect, c1: 0.0, c2: 0.0, c3: 0.0,
+            c4: 0.0, c5: vertical, c6: 0.0, c7: 0.0,
+            c8: 0.0, c9: 0.0, c10: depth, c11: -1.0,
+            c12: 0.0, c13: 0.0, c14: span, c15: 0.0,
+        }
+    }
+
+    pub fun look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
+        offset := target.sub(eye)
+        when offset.length() == (0.0 as f32) { return Mat4::identity() }
+        forward := offset.normalized()
+        side_offset := forward.cross(up)
+        when side_offset.length() == (0.0 as f32) { return Mat4::identity() }
+        side := side_offset.normalized()
+        cam_up := side.cross(forward)
+        return Mat4 {
+            c0: side.x, c1: cam_up.x, c2: 0.0 - forward.x, c3: 0.0,
+            c4: side.y, c5: cam_up.y, c6: 0.0 - forward.y, c7: 0.0,
+            c8: side.z, c9: cam_up.z, c10: 0.0 - forward.z, c11: 0.0,
+            c12: 0.0 - side.dot(eye), c13: 0.0 - cam_up.dot(eye), c14: forward.dot(eye), c15: 1.0,
+        }
+    }
+
+    pub fun mul(self, rhs: Mat4) -> Mat4 => Mat4 {
+        c0: self.c0 * rhs.c0 + self.c4 * rhs.c1 + self.c8 * rhs.c2 + self.c12 * rhs.c3,
+        c1: self.c1 * rhs.c0 + self.c5 * rhs.c1 + self.c9 * rhs.c2 + self.c13 * rhs.c3,
+        c2: self.c2 * rhs.c0 + self.c6 * rhs.c1 + self.c10 * rhs.c2 + self.c14 * rhs.c3,
+        c3: self.c3 * rhs.c0 + self.c7 * rhs.c1 + self.c11 * rhs.c2 + self.c15 * rhs.c3,
+        c4: self.c0 * rhs.c4 + self.c4 * rhs.c5 + self.c8 * rhs.c6 + self.c12 * rhs.c7,
+        c5: self.c1 * rhs.c4 + self.c5 * rhs.c5 + self.c9 * rhs.c6 + self.c13 * rhs.c7,
+        c6: self.c2 * rhs.c4 + self.c6 * rhs.c5 + self.c10 * rhs.c6 + self.c14 * rhs.c7,
+        c7: self.c3 * rhs.c4 + self.c7 * rhs.c5 + self.c11 * rhs.c6 + self.c15 * rhs.c7,
+        c8: self.c0 * rhs.c8 + self.c4 * rhs.c9 + self.c8 * rhs.c10 + self.c12 * rhs.c11,
+        c9: self.c1 * rhs.c8 + self.c5 * rhs.c9 + self.c9 * rhs.c10 + self.c13 * rhs.c11,
+        c10: self.c2 * rhs.c8 + self.c6 * rhs.c9 + self.c10 * rhs.c10 + self.c14 * rhs.c11,
+        c11: self.c3 * rhs.c8 + self.c7 * rhs.c9 + self.c11 * rhs.c10 + self.c15 * rhs.c11,
+        c12: self.c0 * rhs.c12 + self.c4 * rhs.c13 + self.c8 * rhs.c14 + self.c12 * rhs.c15,
+        c13: self.c1 * rhs.c12 + self.c5 * rhs.c13 + self.c9 * rhs.c14 + self.c13 * rhs.c15,
+        c14: self.c2 * rhs.c12 + self.c6 * rhs.c13 + self.c10 * rhs.c14 + self.c14 * rhs.c15,
+        c15: self.c3 * rhs.c12 + self.c7 * rhs.c13 + self.c11 * rhs.c14 + self.c15 * rhs.c15,
+    }
 }
