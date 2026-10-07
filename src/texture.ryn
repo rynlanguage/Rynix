@@ -1,0 +1,104 @@
+// PNG decoder uses the Windows Imaging Component. No native companion DLL is required.
+use rynix::memory
+use rynix::file_data
+#[repr(C)]
+struct Guid { a: u32, b: u16, c: u16, d: [u8; 8] }
+#[repr(C)]
+pub struct TextureData { pub refs: u32, pub width: u32, pub height: u32, pub pixels: *u8 }
+#[drop(drop_texture)]
+pub struct Texture { data: *TextureData }
+pub fun retain(data: *TextureData) { when !pointer_is_null(data as *u8) { data.refs += 1 } }
+pub fun release(data: *TextureData) {
+    when pointer_is_null(data as *u8) { return }
+    data.refs -= 1
+    when data.refs == 0 { memory::release(data.pixels) memory::release(data as *u8) }
+}
+fun drop_texture(value: Texture) { release(value.data) }
+pub fun data(value: &Texture) -> *TextureData => value.data
+pub fun allocate(width: u32, height: u32) -> *TextureData {
+    when width == 0 || height == 0 || width > 8192 || height > 8192 { return 0 as *TextureData }
+    pointer := memory::allocate(sizeof(TextureData)) as *TextureData
+    when pointer_is_null(pointer as *u8) { return pointer }
+    pointer.refs = 1 pointer.width = width pointer.height = height
+    pointer.pixels = memory::allocate((width as u64) * (height as u64) * 4)
+    when pointer_is_null(pointer.pixels) { release(pointer) return 0 as *TextureData }
+    return pointer
+}
+pub fun method(object: *u8, slot: u64) -> *u8 {
+    table := object as **u8
+    base := *table
+    field := ((base as u64) + slot * 8) as **u8
+    return *field
+}
+type WicReleaseFn = extern "C" fun(*u8) -> u32
+fun com_release(object: *u8) { when !pointer_is_null(object) { call: WicReleaseFn = method(object, 2) as WicReleaseFn call(object) } }
+type WicInitFn = extern "C" fun(*u8, u32) -> i32
+type WicUninitFn = extern "C" fun()
+type WicCreateFn = extern "C" fun(*Guid, *u8, u32, *Guid, **u8) -> i32
+type WicStreamFn = extern "C" fun(*u8, **u8) -> i32
+type WicStreamInitFn = extern "C" fun(*u8, *u8, u32) -> i32
+type WicDecodeFn = extern "C" fun(*u8, *u8, *u8, u32, **u8) -> i32
+type WicFrameFn = extern "C" fun(*u8, u32, **u8) -> i32
+type WicConvertFn = extern "C" fun(*u8, *u8, *Guid, u32, *u8, f64, u32) -> i32
+type WicSizeFn = extern "C" fun(*u8, *u32, *u32) -> i32
+type WicCopyFn = extern "C" fun(*u8, *u8, u32, u32, *u8) -> i32
+pub fun decode(bytes: *u8, length: u64) -> Texture {
+    mut result := 0 as *TextureData
+    when pointer_is_null(bytes) || length < 8 || length > 268435456 { return Texture { data: result } }
+    // This API deliberately accepts PNG only, rather than claiming support for every WIC codec.
+    when file_data::byte(bytes, 0) != 137 || file_data::byte(bytes, 1) != 80 || file_data::byte(bytes, 2) != 78 || file_data::byte(bytes, 3) != 71 { return Texture { data: result } }
+    library := load_library("ole32.dll")
+    initialize: WicInitFn = load_symbol(library, "CoInitializeEx") as WicInitFn
+    uninitialize: WicUninitFn = load_symbol(library, "CoUninitialize") as WicUninitFn
+    create: WicCreateFn = load_symbol(library, "CoCreateInstance") as WicCreateFn
+    initialized := initialize(0 as *u8, 0)
+    mut clsid := Guid { a: 3402297954, b: 37744, c: 17941, d: [161, 59, 159, 85, 57, 218, 76, 10] }
+    mut iid := Guid { a: 3965634729, b: 50069, c: 17172, d: [156, 119, 84, 215, 169, 53, 255, 112] }
+    mut format := Guid { a: 4123503917, b: 27277, c: 17373, d: [167, 168, 162, 153, 53, 38, 26, 233] }
+    mut factory := 0 as *u8
+    mut stream := 0 as *u8
+    mut decoder := 0 as *u8
+    mut frame := 0 as *u8
+    mut converter := 0 as *u8
+    when create(&raw mut clsid, 0 as *u8, 1, &raw mut iid, &raw mut factory) == 0 {
+        create_stream: WicStreamFn = method(factory, 14) as WicStreamFn
+        when create_stream(factory, &raw mut stream) == 0 {
+            init_stream: WicStreamInitFn = method(stream, 16) as WicStreamInitFn
+            decode_stream: WicDecodeFn = method(factory, 4) as WicDecodeFn
+            when init_stream(stream, bytes, length as u32) == 0 && decode_stream(factory, stream, 0 as *u8, 0, &raw mut decoder) == 0 {
+                get_frame: WicFrameFn = method(decoder, 13) as WicFrameFn
+                create_converter: WicStreamFn = method(factory, 10) as WicStreamFn
+                when get_frame(decoder, 0, &raw mut frame) == 0 && create_converter(factory, &raw mut converter) == 0 {
+                    convert: WicConvertFn = method(converter, 8) as WicConvertFn
+                    when convert(converter, frame, &raw mut format, 0, 0 as *u8, 0.0, 0) == 0 {
+                        size: WicSizeFn = method(converter, 3) as WicSizeFn
+                        copy: WicCopyFn = method(converter, 7) as WicCopyFn
+                        mut width: u32 = 0 mut height: u32 = 0
+                        when size(converter, &raw mut width, &raw mut height) == 0 {
+                            result = allocate(width, height)
+                            when !pointer_is_null(result as *u8) {
+                                when copy(converter, 0 as *u8, width * 4, width * height * 4, result.pixels) != 0 { release(result) result = 0 as *TextureData }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    com_release(converter) com_release(frame) com_release(decoder) com_release(stream) com_release(factory)
+    when initialized >= 0 { uninitialize() }
+    unload_library(library)
+    return Texture { data: result }
+}
+extend Texture {
+    pub fun storage(self) -> *TextureData => self.data
+    pub fun load(path: str) -> Texture { bytes := file_data::read(path) return decode(bytes.data, bytes.length) }
+    pub fun white() -> Texture {
+        pointer := allocate(1, 1)
+        when !pointer_is_null(pointer as *u8) { pixel := pointer.pixels as *u32 *pixel = 4294967295 }
+        return Texture { data: pointer }
+    }
+    pub fun is_ready(self) -> bool => !pointer_is_null(self.data as *u8)
+    pub fun width(self) -> u32 { when !self.is_ready() { return 0 } return self.data.width }
+    pub fun height(self) -> u32 { when !self.is_ready() { return 0 } return self.data.height }
+}

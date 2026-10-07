@@ -1,0 +1,297 @@
+// Private Vulkan resource cache. CPU handles can outlive a device; cached resources retain them.
+use rynix::assets
+use rynix::texture
+use rynix::memory
+use rynix::file_data
+use rynix::vk_data
+#[repr(C)]
+struct BufferInfo { kind: u32, next: *u8, flags: u32, size: u64, usage: u32, sharing: u32, count: u32, families: *u8 }
+#[repr(C)]
+struct Requirements { size: u64, alignment: u64, bits: u32 }
+#[repr(C)]
+struct Allocation { kind: u32, next: *u8, size: u64, memory_type: u32 }
+#[repr(C)]
+struct Properties { count: u32, types: [u32; 64], heap_count: u32, heaps: [u64; 32] }
+#[repr(C)]
+pub struct Buffer { pub handle: *u8, pub allocation: *u8 }
+#[repr(C)]
+pub struct Entry { pub next: *Entry, pub source: *assets::MeshData, pub vertices: *u8, pub vertex_memory: *u8, pub indices: *u8, pub index_memory: *u8 }
+#[repr(C)]
+pub struct ImageEntry { pub next: *ImageEntry, pub source: *texture::TextureData, pub image: *u8, pub allocation: *u8, pub view: *u8, pub sampler: *u8, pub set: *u8 }
+#[repr(C)]
+pub struct Context {
+    pub getter: *u8, pub device: *u8, pub physical: *u8, pub instance_getter: *u8, pub instance: *u8,
+    pub queue: *u8, pub family: u32, pub meshes: *Entry, pub images: *ImageEntry,
+    pub set_layout: *u8, pub descriptor_pool: *u8,
+    pub cube: *assets::MeshData, pub plane: *assets::MeshData, pub sphere: *assets::MeshData, pub white: *texture::TextureData,
+    pub sun_x: f32, pub sun_y: f32, pub sun_z: f32, pub sun_intensity: f32, pub sun_color: u32,
+    pub ambient_r: f32, pub ambient_g: f32, pub ambient_b: f32, pub ambient_intensity: f32,
+}
+pub fun name(text: str) -> vk_data::VkText {
+    value := String(text)
+    mut bytes: [u8; 64] = [0; 64]
+    mut i: u64 = 0
+    while i < value.len() && i < 63 { bytes[i] = value.byte_at(i) i += 1 }
+    return vk_data::VkText { bytes: bytes }
+}
+pub fun proc(context: *Context, text: str) -> *u8 => vk_data::resolve(context.getter, context.device, name(text))
+type MbCreateBufferFn = extern "C" fun(*u8, *BufferInfo, *u8, **u8) -> i32
+type MbRequirementsFn = extern "C" fun(*u8, *u8, *Requirements)
+type MbPropertiesFn = extern "C" fun(*u8, *Properties)
+type MbAllocateFn = extern "C" fun(*u8, *Allocation, *u8, **u8) -> i32
+type MbBindFn = extern "C" fun(*u8, *u8, *u8, u64) -> i32
+type MbMapFn = extern "C" fun(*u8, *u8, u64, u64, u32, **u8) -> i32
+type MbUnmapFn = extern "C" fun(*u8, *u8)
+type MbDestroyFn = extern "C" fun(*u8, *u8, *u8)
+pub fun destroy(context: *Context, text: str, object: *u8) {
+    when pointer_is_null(object) { return }
+    function := proc(context, text)
+    when !pointer_is_null(function) { call: MbDestroyFn = function as MbDestroyFn call(context.device, object, 0 as *u8) }
+}
+fun memory_type(context: *Context, bits: u32, flags: u32) -> u32 {
+    function := vk_data::resolve(context.instance_getter, context.instance, name("vkGetPhysicalDeviceMemoryProperties"))
+    call: MbPropertiesFn = function as MbPropertiesFn
+    mut properties := Properties { count: 0, types: [0; 64], heap_count: 0, heaps: [0; 32] }
+    call(context.physical, &raw mut properties)
+    mut i: u32 = 0
+    while i < properties.count && i < 32 {
+        when (bits & ((1 as u32) << i)) != 0 && (properties.types[(i * 2) as u64] & flags) == flags { return i }
+        i += 1
+    }
+    return 4294967295
+}
+fun allocate_memory(context: *Context, requirements: Requirements, flags: u32) -> *u8 {
+    selected := memory_type(context, requirements.bits, flags)
+    when selected == 4294967295 { return 0 as *u8 }
+    mut info := Allocation { kind: 5, next: 0 as *u8, size: requirements.size, memory_type: selected }
+    call: MbAllocateFn = proc(context, "vkAllocateMemory") as MbAllocateFn
+    mut out := 0 as *u8
+    when call(context.device, &raw mut info, 0 as *u8, &raw mut out) != 0 { return 0 as *u8 }
+    return out
+}
+pub fun buffer(context: *Context, bytes: *u8, length: u64, usage: u32) -> Buffer {
+    mut out := Buffer { handle: 0 as *u8, allocation: 0 as *u8 }
+    mut info := BufferInfo { kind: 12, next: 0 as *u8, flags: 0, size: length, usage: usage, sharing: 0, count: 0, families: 0 as *u8 }
+    create: MbCreateBufferFn = proc(context, "vkCreateBuffer") as MbCreateBufferFn
+    requirements_fn: MbRequirementsFn = proc(context, "vkGetBufferMemoryRequirements") as MbRequirementsFn
+    bind: MbBindFn = proc(context, "vkBindBufferMemory") as MbBindFn
+    map: MbMapFn = proc(context, "vkMapMemory") as MbMapFn
+    unmap: MbUnmapFn = proc(context, "vkUnmapMemory") as MbUnmapFn
+    mut handle := 0 as *u8
+    when create(context.device, &raw mut info, 0 as *u8, &raw mut handle) != 0 { return out }
+    mut requirements := Requirements { size: 0, alignment: 0, bits: 0 }
+    requirements_fn(context.device, handle, &raw mut requirements)
+    allocation := allocate_memory(context, requirements, 6)
+    mut mapped := 0 as *u8
+    when pointer_is_null(allocation) || bind(context.device, handle, allocation, 0) != 0 || map(context.device, allocation, 0, length, 0, &raw mut mapped) != 0 {
+        destroy(context, "vkDestroyBuffer", handle) destroy(context, "vkFreeMemory", allocation) return out
+    }
+    mut i: u64 = 0
+    while i < length { file_data::put(mapped, i, file_data::byte(bytes, i)) i += 1 }
+    unmap(context.device, allocation)
+    out.handle = handle out.allocation = allocation
+    return out
+}
+pub fun mesh(context: *Context, source: *assets::MeshData) -> *Entry {
+    when pointer_is_null(context as *u8) || pointer_is_null(source as *u8) { return 0 as *Entry }
+    mut entry := context.meshes
+    while !pointer_is_null(entry as *u8) { when entry.source == source { return entry } entry = entry.next }
+    vertex := buffer(context, source.vertices, (source.vertex_count as u64) * 32, 128)
+    index := buffer(context, source.indices, (source.index_count as u64) * 4, 64)
+    when pointer_is_null(vertex.handle) || pointer_is_null(index.handle) {
+        destroy(context, "vkDestroyBuffer", vertex.handle) destroy(context, "vkFreeMemory", vertex.allocation)
+        destroy(context, "vkDestroyBuffer", index.handle) destroy(context, "vkFreeMemory", index.allocation)
+        return 0 as *Entry
+    }
+    entry = memory::allocate(sizeof(Entry)) as *Entry
+    when pointer_is_null(entry as *u8) {
+        destroy(context, "vkDestroyBuffer", vertex.handle) destroy(context, "vkFreeMemory", vertex.allocation)
+        destroy(context, "vkDestroyBuffer", index.handle) destroy(context, "vkFreeMemory", index.allocation)
+        return entry
+    }
+    assets::retain_mesh(source)
+    entry.source = source entry.vertices = vertex.handle entry.vertex_memory = vertex.allocation
+    entry.indices = index.handle entry.index_memory = index.allocation entry.next = context.meshes context.meshes = entry
+    return entry
+}
+#[repr(C)]
+struct Binding { binding: u32, kind: u32, count: u32, stages: u32, immutable: *u8 }
+#[repr(C)]
+struct Bindings { image: Binding, sampler: Binding }
+#[repr(C)]
+struct LayoutInfo { kind: u32, next: *u8, flags: u32, count: u32, bindings: *u8 }
+#[repr(C)]
+struct PoolSize { kind: u32, count: u32 }
+#[repr(C)]
+struct PoolSizes { image: PoolSize, sampler: PoolSize }
+#[repr(C)]
+struct PoolInfo { kind: u32, next: *u8, flags: u32, max_sets: u32, count: u32, sizes: *u8 }
+type MbLayoutFn = extern "C" fun(*u8, *LayoutInfo, *u8, **u8) -> i32
+type MbPoolFn = extern "C" fun(*u8, *PoolInfo, *u8, **u8) -> i32
+pub fun open(getter: *u8, device: *u8, physical: *u8, instance_getter: *u8, instance: *u8, queue: *u8, family: u32) -> *Context {
+    context := memory::allocate(sizeof(Context)) as *Context
+    when pointer_is_null(context as *u8) { return context }
+    context.getter = getter context.device = device context.physical = physical context.instance_getter = instance_getter context.instance = instance context.queue = queue context.family = family
+    context.sun_x = -0.4 context.sun_y = -1.0 context.sun_z = -0.3 context.sun_intensity = 0.8 context.sun_color = 4294967295
+    context.ambient_r = 1.0 context.ambient_g = 1.0 context.ambient_b = 1.0 context.ambient_intensity = 0.25
+    mut bindings := Bindings { image: Binding { binding: 0, kind: 2, count: 1, stages: 16, immutable: 0 as *u8 }, sampler: Binding { binding: 1, kind: 0, count: 1, stages: 16, immutable: 0 as *u8 } }
+    mut info := LayoutInfo { kind: 32, next: 0 as *u8, flags: 0, count: 2, bindings: (&raw bindings) as *u8 }
+    create_layout: MbLayoutFn = proc(context, "vkCreateDescriptorSetLayout") as MbLayoutFn
+    mut layout := 0 as *u8
+    when create_layout(device, &raw mut info, 0 as *u8, &raw mut layout) != 0 { close(context) return 0 as *Context }
+    context.set_layout = layout
+    mut sizes := PoolSizes { image: PoolSize { kind: 2, count: 256 }, sampler: PoolSize { kind: 0, count: 256 } }
+    mut pool_info := PoolInfo { kind: 33, next: 0 as *u8, flags: 0, max_sets: 256, count: 2, sizes: (&raw sizes) as *u8 }
+    create_pool: MbPoolFn = proc(context, "vkCreateDescriptorPool") as MbPoolFn
+    mut pool := 0 as *u8
+    when create_pool(device, &raw mut pool_info, 0 as *u8, &raw mut pool) != 0 { close(context) return 0 as *Context }
+    context.descriptor_pool = pool
+    cube := assets::Mesh::cube() plane := assets::Mesh::plane() sphere := assets::Mesh::sphere(32, 16) white := texture::Texture::white()
+    context.cube = cube.storage() assets::retain_mesh(context.cube)
+    context.plane = plane.storage() assets::retain_mesh(context.plane)
+    context.sphere = sphere.storage() assets::retain_mesh(context.sphere)
+    context.white = white.storage() texture::retain(context.white)
+    return context
+}
+pub fun close(context: *Context) {
+    when pointer_is_null(context as *u8) { return }
+    mut entry := context.meshes
+    while !pointer_is_null(entry as *u8) {
+        next := entry.next
+        destroy(context, "vkDestroyBuffer", entry.vertices) destroy(context, "vkFreeMemory", entry.vertex_memory)
+        destroy(context, "vkDestroyBuffer", entry.indices) destroy(context, "vkFreeMemory", entry.index_memory)
+        assets::release_mesh(entry.source) memory::release(entry as *u8) entry = next
+    }
+    mut image := context.images
+    while !pointer_is_null(image as *u8) {
+        next := image.next
+        destroy(context, "vkDestroyImageView", image.view) destroy(context, "vkDestroySampler", image.sampler)
+        destroy(context, "vkDestroyImage", image.image) destroy(context, "vkFreeMemory", image.allocation)
+        texture::release(image.source) memory::release(image as *u8) image = next
+    }
+    destroy(context, "vkDestroyDescriptorPool", context.descriptor_pool) destroy(context, "vkDestroyDescriptorSetLayout", context.set_layout)
+    assets::release_mesh(context.cube) assets::release_mesh(context.plane) assets::release_mesh(context.sphere) texture::release(context.white)
+    memory::release(context as *u8)
+}
+#[repr(C)]
+struct ImageInfo { kind: u32, next: *u8, flags: u32, image_type: u32, format: u32, width: u32, height: u32, depth: u32, mips: u32, layers: u32, samples: u32, tiling: u32, usage: u32, sharing: u32, count: u32, families: *u8, initial: u32 }
+#[repr(C)]
+struct ViewInfo { kind: u32, next: *u8, flags: u32, image: *u8, view_type: u32, format: u32, r: u32, g: u32, b: u32, a: u32, aspect: u32, mip: u32, mips: u32, layer: u32, layers: u32 }
+#[repr(C)]
+struct SamplerInfo { kind: u32, next: *u8, flags: u32, mag: u32, min: u32, mip: u32, u: u32, v: u32, w: u32, bias: f32, anisotropy: u32, max_anisotropy: f32, compare: u32, compare_op: u32, min_lod: f32, max_lod: f32, border: u32, unnormalized: u32 }
+#[repr(C)]
+struct CommandPool { kind: u32, next: *u8, flags: u32, family: u32 }
+#[repr(C)]
+struct CommandAlloc { kind: u32, next: *u8, pool: *u8, level: u32, count: u32 }
+#[repr(C)]
+struct CommandBegin { kind: u32, next: *u8, flags: u32, inherit: *u8 }
+#[repr(C)]
+struct Barrier { kind: u32, next: *u8, src: u32, dst: u32, old: u32, new: u32, src_family: u32, dst_family: u32, image: *u8, aspect: u32, mip: u32, mips: u32, layer: u32, layers: u32 }
+#[repr(C)]
+struct CopyRegion { offset: u64, row: u32, height: u32, aspect: u32, mip: u32, layer: u32, layers: u32, x: i32, y: i32, z: i32, width: u32, extent_height: u32, depth: u32 }
+#[repr(C)]
+struct Submit { kind: u32, next: *u8, wait_count: u32, waits: *u8, stages: *u8, count: u32, commands: *u8, signal_count: u32, signals: *u8 }
+#[repr(C)]
+struct SetAlloc { kind: u32, next: *u8, pool: *u8, count: u32, layouts: *u8 }
+#[repr(C)]
+struct DescriptorImage { sampler: *u8, view: *u8, layout: u32 }
+#[repr(C)]
+struct Write { kind: u32, next: *u8, set: *u8, binding: u32, element: u32, count: u32, descriptor_type: u32, images: *u8, buffers: *u8, texels: *u8 }
+#[repr(C)]
+struct Writes { image: Write, sampler: Write }
+type MbImageFn = extern "C" fun(*u8, *ImageInfo, *u8, **u8) -> i32
+type MbViewFn = extern "C" fun(*u8, *ViewInfo, *u8, **u8) -> i32
+type MbSamplerFn = extern "C" fun(*u8, *SamplerInfo, *u8, **u8) -> i32
+type MbCommandPoolFn = extern "C" fun(*u8, *CommandPool, *u8, **u8) -> i32
+type MbCommandAllocFn = extern "C" fun(*u8, *CommandAlloc, **u8) -> i32
+type MbBeginFn = extern "C" fun(*u8, *CommandBegin) -> i32
+type MbEndFn = extern "C" fun(*u8) -> i32
+type MbBarrierFn = extern "C" fun(*u8, u32, u32, u32, u32, *u8, u32, *u8, u32, *Barrier)
+type MbCopyFn = extern "C" fun(*u8, *u8, *u8, u32, u32, *CopyRegion)
+type MbSubmitFn = extern "C" fun(*u8, u32, *Submit, *u8) -> i32
+type MbSetAllocFn = extern "C" fun(*u8, *SetAlloc, **u8) -> i32
+type MbWriteFn = extern "C" fun(*u8, u32, *Writes, u32, *u8)
+fun upload_image(context: *Context, source: *texture::TextureData, image: *u8) -> bool {
+    staging := buffer(context, source.pixels, (source.width as u64) * (source.height as u64) * 4, 1)
+    when pointer_is_null(staging.handle) { return false }
+    create: MbCommandPoolFn = proc(context, "vkCreateCommandPool") as MbCommandPoolFn
+    allocate: MbCommandAllocFn = proc(context, "vkAllocateCommandBuffers") as MbCommandAllocFn
+    begin: MbBeginFn = proc(context, "vkBeginCommandBuffer") as MbBeginFn
+    end: MbEndFn = proc(context, "vkEndCommandBuffer") as MbEndFn
+    barrier: MbBarrierFn = proc(context, "vkCmdPipelineBarrier") as MbBarrierFn
+    copy: MbCopyFn = proc(context, "vkCmdCopyBufferToImage") as MbCopyFn
+    submit: MbSubmitFn = proc(context, "vkQueueSubmit") as MbSubmitFn
+    wait: MbEndFn = proc(context, "vkQueueWaitIdle") as MbEndFn
+    mut pool := 0 as *u8 mut command := 0 as *u8 mut success := false
+    mut pool_info := CommandPool { kind: 39, next: 0 as *u8, flags: 1, family: context.family }
+    when create(context.device, &raw mut pool_info, 0 as *u8, &raw mut pool) == 0 {
+        mut alloc := CommandAlloc { kind: 40, next: 0 as *u8, pool: pool, level: 0, count: 1 }
+        when allocate(context.device, &raw mut alloc, &raw mut command) == 0 {
+            mut info := CommandBegin { kind: 42, next: 0 as *u8, flags: 1, inherit: 0 as *u8 }
+            when begin(command, &raw mut info) == 0 {
+                mut transition := Barrier { kind: 45, next: 0 as *u8, src: 0, dst: 4096, old: 0, new: 7, src_family: 4294967295, dst_family: 4294967295, image: image, aspect: 1, mip: 0, mips: 1, layer: 0, layers: 1 }
+                barrier(command, 1, 4096, 0, 0, 0 as *u8, 0, 0 as *u8, 1, &raw mut transition)
+                mut region := CopyRegion { offset: 0, row: 0, height: 0, aspect: 1, mip: 0, layer: 0, layers: 1, x: 0, y: 0, z: 0, width: source.width, extent_height: source.height, depth: 1 }
+                copy(command, staging.handle, image, 7, 1, &raw mut region)
+                transition.src = 4096 transition.dst = 32 transition.old = 7 transition.new = 5
+                barrier(command, 4096, 128, 0, 0, 0 as *u8, 0, 0 as *u8, 1, &raw mut transition)
+                when end(command) == 0 {
+                    mut submitted := Submit { kind: 4, next: 0 as *u8, wait_count: 0, waits: 0 as *u8, stages: 0 as *u8, count: 1, commands: (&raw command) as *u8, signal_count: 0, signals: 0 as *u8 }
+                    when submit(context.queue, 1, &raw mut submitted, 0 as *u8) == 0 { success = wait(context.queue) == 0 }
+                }
+            }
+        }
+    }
+    destroy(context, "vkDestroyCommandPool", pool)
+    destroy(context, "vkDestroyBuffer", staging.handle) destroy(context, "vkFreeMemory", staging.allocation)
+    return success
+}
+pub fun image(context: *Context, source: *texture::TextureData) -> *ImageEntry {
+    when pointer_is_null(context as *u8) || pointer_is_null(source as *u8) { return 0 as *ImageEntry }
+    mut entry := context.images mut count: u32 = 0
+    while !pointer_is_null(entry as *u8) { when entry.source == source { return entry } entry = entry.next count += 1 }
+    when count >= 256 { return 0 as *ImageEntry }
+    mut image := 0 as *u8 mut allocation := 0 as *u8 mut view := 0 as *u8 mut sampler := 0 as *u8 mut set := 0 as *u8
+    mut info := ImageInfo { kind: 14, next: 0 as *u8, flags: 0, image_type: 1, format: 37, width: source.width, height: source.height, depth: 1, mips: 1, layers: 1, samples: 1, tiling: 0, usage: 6, sharing: 0, count: 0, families: 0 as *u8, initial: 0 }
+    create: MbImageFn = proc(context, "vkCreateImage") as MbImageFn
+    requirements_fn: MbRequirementsFn = proc(context, "vkGetImageMemoryRequirements") as MbRequirementsFn
+    bind: MbBindFn = proc(context, "vkBindImageMemory") as MbBindFn
+    mut success := false
+    when create(context.device, &raw mut info, 0 as *u8, &raw mut image) == 0 {
+        mut requirements := Requirements { size: 0, alignment: 0, bits: 0 }
+        requirements_fn(context.device, image, &raw mut requirements)
+        allocation = allocate_memory(context, requirements, 1)
+        when pointer_is_null(allocation) { allocation = allocate_memory(context, requirements, 0) }
+        when !pointer_is_null(allocation) && bind(context.device, image, allocation, 0) == 0 && upload_image(context, source, image) {
+            mut view_info := ViewInfo { kind: 15, next: 0 as *u8, flags: 0, image: image, view_type: 1, format: 37, r: 0, g: 0, b: 0, a: 0, aspect: 1, mip: 0, mips: 1, layer: 0, layers: 1 }
+            create_view: MbViewFn = proc(context, "vkCreateImageView") as MbViewFn
+            mut sampler_info := SamplerInfo { kind: 31, next: 0 as *u8, flags: 0, mag: 1, min: 1, mip: 1, u: 0, v: 0, w: 0, bias: 0.0, anisotropy: 0, max_anisotropy: 1.0, compare: 0, compare_op: 0, min_lod: 0.0, max_lod: 0.0, border: 0, unnormalized: 0 }
+            create_sampler: MbSamplerFn = proc(context, "vkCreateSampler") as MbSamplerFn
+            when create_view(context.device, &raw mut view_info, 0 as *u8, &raw mut view) == 0 && create_sampler(context.device, &raw mut sampler_info, 0 as *u8, &raw mut sampler) == 0 {
+                mut layout := context.set_layout
+                mut alloc := SetAlloc { kind: 34, next: 0 as *u8, pool: context.descriptor_pool, count: 1, layouts: (&raw layout) as *u8 }
+                allocate_set: MbSetAllocFn = proc(context, "vkAllocateDescriptorSets") as MbSetAllocFn
+                when allocate_set(context.device, &raw mut alloc, &raw mut set) == 0 {
+                    mut descriptor := DescriptorImage { sampler: sampler, view: view, layout: 5 }
+                    mut writes := Writes {
+                        image: Write { kind: 35, next: 0 as *u8, set: set, binding: 0, element: 0, count: 1, descriptor_type: 2, images: (&raw descriptor) as *u8, buffers: 0 as *u8, texels: 0 as *u8 },
+                        sampler: Write { kind: 35, next: 0 as *u8, set: set, binding: 1, element: 0, count: 1, descriptor_type: 0, images: (&raw descriptor) as *u8, buffers: 0 as *u8, texels: 0 as *u8 },
+                    }
+                    update: MbWriteFn = proc(context, "vkUpdateDescriptorSets") as MbWriteFn
+                    update(context.device, 2, &raw mut writes, 0, 0 as *u8)
+                    success = true
+                }
+            }
+        }
+    }
+    entry = memory::allocate(sizeof(ImageEntry)) as *ImageEntry
+    when !success || pointer_is_null(entry as *u8) {
+        destroy(context, "vkDestroySampler", sampler) destroy(context, "vkDestroyImageView", view)
+        destroy(context, "vkDestroyImage", image) destroy(context, "vkFreeMemory", allocation)
+        memory::release(entry as *u8) return 0 as *ImageEntry
+    }
+    texture::retain(source)
+    entry.source = source entry.image = image entry.allocation = allocation entry.view = view entry.sampler = sampler entry.set = set
+    entry.next = context.images context.images = entry
+    return entry
+}

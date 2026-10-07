@@ -1,5 +1,6 @@
 // Native Windows windowing through Ryn's typed dynamic FFI.
 // Win32 ABI records and handles are private implementation details.
+use rynix::memory
 type WideData = [u16; 128]
 type ClassData = [u16; 16]
 
@@ -61,17 +62,62 @@ type MsgWaitFn = extern "C" fun(u32, *u8, i32, u32, u32) -> u32
 type GetKeyboardStateFn = extern "C" fun(*KeyboardState) -> i32
 type GetForegroundWindowFn = extern "C" fun() -> *u8
 type GetWindowThreadFn = extern "C" fun(*u8, *u8) -> u32
+type GetUserDataFn = extern "C" fun(*u8, i32) -> *u8
+type SetUserDataFn = extern "C" fun(*u8, i32, *u8) -> *u8
+type CaptureFn = extern "C" fun(*u8) -> *u8
+type ReleaseCaptureFn = extern "C" fun() -> i32
+type GetCaptureFn = extern "C" fun() -> *u8
+type ShowCursorFn = extern "C" fun(i32) -> i32
+type ClipCursorFn = extern "C" fun(*Rect) -> i32
+type ClientToScreenFn = extern "C" fun(*u8, *Point) -> i32
+#[repr(C)]
+struct CloseState { closed: u32 }
+#[repr(C)]
+struct CreateState { parameter: *CloseState }
+#[repr(C)]
+struct RawDevice { page: u16, usage: u16, flags: u32, target: *u8 }
+#[repr(C)]
+struct RawMouse {
+    kind: u32, size: u32, device: *u8, parameter: u64,
+    flags: u16, padding: u16, button_flags: u16, button_data: u16,
+    buttons: u32, dx: i32, dy: i32, extra: u32,
+}
+type RegisterRawFn = extern "C" fun(*RawDevice, u32, u32) -> i32
+type ReadRawFn = extern "C" fun(*u8, u32, *RawMouse, *u32, u32) -> u32
 
 type KeyboardData = [u8; 256]
 #[repr(C)]
 struct KeyboardState { data: KeyboardData }
 
-// WM_CLOSE is swallowed. The title-bar button and Alt+F4 do not destroy the window;
-// Window.close posts the destroy through the cached DestroyWindow pointer.
+// A heap state survives moves of Window, so the callback never points at a moved Ryn local.
 fun rynix_window_proc(hwnd: *u8, message: u32, w_param: u64, l_param: i64) -> i64 {
-    when message == (16 as u32) { return 0 }
     user32 := load_library("user32.dll")
     when pointer_is_null(user32) { return 0 }
+    get_data: GetUserDataFn = load_symbol(user32, "GetWindowLongPtrW") as GetUserDataFn
+    when message == 129 {
+        create := l_param as *CreateState
+        set_data: SetUserDataFn = load_symbol(user32, "SetWindowLongPtrW") as SetUserDataFn
+        set_data(hwnd, -21, create.parameter as *u8)
+    }
+    when message == 16 || message == 2 {
+        state := get_data(hwnd, -21) as *CloseState
+        when !pointer_is_null(state as *u8) { state.closed = 1 }
+        when message == 16 {
+            destroy: DestroyWindowFn = load_symbol(user32, "DestroyWindow") as DestroyWindowFn
+            destroy(hwnd)
+        }
+        unload_library(user32)
+        return 0
+    }
+    when message == 32 {
+        captured: GetCaptureFn = load_symbol(user32, "GetCapture") as GetCaptureFn
+        when (captured() == hwnd) {
+            set_cursor: SetCursorFn = load_symbol(user32, "SetCursor") as SetCursorFn
+            set_cursor(0 as *u8)
+            unload_library(user32)
+            return 1
+        }
+    }
     def_proc: WindowProcedure = load_symbol(user32, "DefWindowProcW") as WindowProcedure
     when pointer_is_null(def_proc as *u8) {
         unload_library(user32)
@@ -209,6 +255,11 @@ extend MouseButton {
 
 #[drop(drop_window)]
 pub struct Window {
+    state: *CloseState,
+    captured: bool,
+    hidden_calls: u32,
+    mouse_dx: i32,
+    mouse_dy: i32,
     handle: *u8,
     user32: *u8,
     // Stable null. PeekMessage must not reuse message.hwnd: that field becomes
@@ -264,6 +315,8 @@ fun user32_ready(user32: *u8) -> bool {
 
 fun inert_window(null_handle: *u8) -> Window {
     return Window {
+        state: 0 as *CloseState,
+        captured: false, hidden_calls: 0, mouse_dx: 0, mouse_dy: 0,
         handle: null_handle,
         user32: null_handle,
         null_pointer: null_handle,
@@ -332,7 +385,10 @@ fun key_bit(w0: u64, w1: u64, w2: u64, w3: u64, code: u32) -> bool {
 }
 
 fun drop_window(window: Window) {
-    when !pointer_is_null(window.handle) && !pointer_is_null(window.is_window) && !pointer_is_null(window.destroy_window) {
+    restore_mouse(window.user32, window.handle, window.captured, window.hidden_calls)
+    mut closed: bool = false
+    when !pointer_is_null(window.state as *u8) { closed = window.state.closed != (0 as u32) }
+    when !closed && !pointer_is_null(window.handle) && !pointer_is_null(window.is_window) && !pointer_is_null(window.destroy_window) {
         is_window: IsWindowFn = window.is_window as IsWindowFn
         when is_window(window.handle) != (0 as i32) {
             destroy: DestroyWindowFn = window.destroy_window as DestroyWindowFn
@@ -340,6 +396,20 @@ fun drop_window(window: Window) {
         }
     }
     when !pointer_is_null(window.user32) { unload_library(window.user32) }
+    memory::release(window.state as *u8)
+}
+
+fun restore_mouse(user32: *u8, hwnd: *u8, captured: bool, hidden_calls: u32) {
+    when !captured || pointer_is_null(user32) { return }
+    release: ReleaseCaptureFn = load_symbol(user32, "ReleaseCapture") as ReleaseCaptureFn
+    clip: ClipCursorFn = load_symbol(user32, "ClipCursor") as ClipCursorFn
+    show: ShowCursorFn = load_symbol(user32, "ShowCursor") as ShowCursorFn
+    get_capture: GetCaptureFn = load_symbol(user32, "GetCapture") as GetCaptureFn
+    owner := get_capture()
+    when owner == hwnd { release() }
+    when owner == hwnd || pointer_is_null(owner) { clip(0 as *Rect) }
+    mut index: u32 = 0
+    while index < hidden_calls { show(1) index += 1 }
 }
 
 fun release_libraries(user32: *u8) {
@@ -412,13 +482,16 @@ extend Window {
             return inert_window(null_handle)
         }
 
+        state := memory::allocate(sizeof(CloseState)) as *CloseState
+        when pointer_is_null(state as *u8) { release_libraries(user32) unload_library(kernel32) return inert_window(null_handle) }
         create: CreateWindowFn = load_symbol(user32, "CreateWindowExW") as CreateWindowFn
         handle := create(
             0, &raw mut class_name, &raw mut title_wide, 13565952,
             -2147483648, -2147483648, rect.right - rect.left, rect.bottom - rect.top,
-            null_handle, null_handle, instance, null_handle
+            null_handle, null_handle, instance, state as *u8
         )
         when pointer_is_null(handle) {
+            memory::release(state as *u8)
             release_libraries(user32)
             unload_library(kernel32)
             return inert_window(null_handle)
@@ -431,6 +504,8 @@ extend Window {
         when !pointer_is_null(arrow) { set_cursor(arrow) }
         unload_library(kernel32)
         return Window {
+            state: state,
+            captured: false, hidden_calls: 0, mouse_dx: 0, mouse_dy: 0,
             handle: handle,
             user32: user32,
             null_pointer: null_handle,
@@ -458,6 +533,7 @@ extend Window {
     // Waits until a thread message arrives or the timeout elapses, then pumps.
     // A plain sleep on this thread makes Windows keep the spinning busy cursor.
     pub fun poll_events_for(mut self, timeout_ms: u32) -> bool {
+        when !self.is_open() { self.release_mouse() return false }
         when !pointer_is_null(self.wait_message) {
             wait: MsgWaitFn = self.wait_message as MsgWaitFn
             wait(0, self.null_pointer, 0, timeout_ms, 1279)
@@ -468,7 +544,9 @@ extend Window {
     // Pumps every message for this thread. The window filter stays null so WM_QUIT is not skipped.
     // Key and button edges come from the pumped messages; held state is sampled once afterwards.
     pub fun poll_events(mut self) -> bool {
-        when !self.is_open() { return false }
+        self.mouse_dx = 0
+        self.mouse_dy = 0
+        when !self.is_open() { self.release_mouse() return false }
         when pointer_is_null(self.peek_message) || pointer_is_null(self.translate_message) || pointer_is_null(self.dispatch_message) {
             return false
         }
@@ -488,13 +566,22 @@ extend Window {
         self.lift2 = 0
         self.lift3 = 0
         while peek(&raw mut message, self.null_pointer, 0, 0, 1) != (0 as i32) {
-            when message.message == 18 { return false }
+            when message.message == 18 { self.close() return false }
+            when (message.hwnd == self.handle) {
+                when message.message == 8 || message.message == 31 { self.release_mouse() }
+                when message.message == 255 && self.captured && self.is_focused() {
+                    self.read_mouse(message.l_param as *u8)
+                }
+            }
             code := message_key(message.message, message.w_param, message.l_param)
-            when code != (0 as u32) { self.record_edge(code, message_is_down(message.message)) }
+            repeat := (message.message == 256 || message.message == 260) && ((message.l_param as u64) & 1073741824) != 0
+            when code != (0 as u32) && message.hwnd == self.handle && !repeat { self.record_edge(code, message_is_down(message.message)) }
             translate(&raw mut message)
             dispatch(&raw mut message)
         }
         self.sample_keys()
+        when !self.is_open() || !self.is_focused() { self.release_mouse() }
+        when self.captured { self.clip_mouse() }
         return self.is_open()
     }
 
@@ -531,15 +618,14 @@ extend Window {
         self.now3 = pack_keys(state, 192)
     }
 
-    // True while the foreground window belongs to this window's thread. Keyboard state is
-    // per thread, so a second Rynix window on the same thread keeps its keys.
+    // True only when this particular window is foreground.
     pub fun is_focused(self) -> bool {
         when !self.is_open() || pointer_is_null(self.foreground_window) || pointer_is_null(self.window_thread) { return false }
         foreground: GetForegroundWindowFn = self.foreground_window as GetForegroundWindowFn
         thread_of: GetWindowThreadFn = self.window_thread as GetWindowThreadFn
         active := foreground()
         when pointer_is_null(active) { return false }
-        return thread_of(active, self.null_pointer) == thread_of(self.handle, self.null_pointer)
+        return active == self.handle
     }
 
     fun is_down(self, code: u32) -> bool => key_bit(self.now0, self.now1, self.now2, self.now3, code)
@@ -547,18 +633,71 @@ extend Window {
     fun was_lifted(self, code: u32) -> bool => key_bit(self.lift0, self.lift1, self.lift2, self.lift3, code)
 
     pub fun is_open(self) -> bool {
+        when pointer_is_null(self.state as *u8) { return false }
+        when self.state.closed != (0 as u32) { return false }
         when pointer_is_null(self.handle) || pointer_is_null(self.is_window) { return false }
         is_window: IsWindowFn = self.is_window as IsWindowFn
         return is_window(self.handle) != (0 as i32)
     }
 
     // Destroys the native window now. Drop checks IsWindow, so this is not destroyed twice.
-    pub fun close(self) {
+    pub fun close(mut self) {
+        self.release_mouse()
         when self.is_open() {
             destroy: DestroyWindowFn = self.destroy_window as DestroyWindowFn
             destroy(self.handle)
         }
     }
+
+    fun read_mouse(mut self, input: *u8) {
+        read: ReadRawFn = load_symbol(self.user32, "GetRawInputData") as ReadRawFn
+        mut packet := RawMouse { kind: 0, size: 0, device: 0 as *u8, parameter: 0, flags: 0, padding: 0, button_flags: 0, button_data: 0, buttons: 0, dx: 0, dy: 0, extra: 0 }
+        mut size := sizeof(RawMouse) as u32
+        result := read(input, 268435459, &raw mut packet, &raw mut size, 24)
+        when result != sizeof(RawMouse) as u32 || packet.kind != (0 as u32) || (packet.flags & 1) != (0 as u16) { return }
+        self.mouse_dx += packet.dx
+        self.mouse_dy += packet.dy
+    }
+
+    fun clip_mouse(self) {
+        to_screen: ClientToScreenFn = load_symbol(self.user32, "ClientToScreen") as ClientToScreenFn
+        clip: ClipCursorFn = load_symbol(self.user32, "ClipCursor") as ClipCursorFn
+        mut point := Point { x: 0, y: 0 }
+        when to_screen(self.handle, &raw mut point) == (0 as i32) { return }
+        mut rect := Rect { left: point.x, top: point.y, right: point.x + (self.width() as i32), bottom: point.y + (self.height() as i32) }
+        clip(&raw mut rect)
+    }
+
+    pub fun capture_mouse(mut self) -> bool {
+        when !self.is_focused() { self.release_mouse() return false }
+        when self.captured { return true }
+        register: RegisterRawFn = load_symbol(self.user32, "RegisterRawInputDevices") as RegisterRawFn
+        mut device := RawDevice { page: 1, usage: 2, flags: 0, target: self.handle }
+        when register(&raw mut device, 1, sizeof(RawDevice) as u32) == (0 as i32) { return false }
+        capture: CaptureFn = load_symbol(self.user32, "SetCapture") as CaptureFn
+        show: ShowCursorFn = load_symbol(self.user32, "ShowCursor") as ShowCursorFn
+        capture(self.handle)
+        self.captured = true
+        self.hidden_calls = 1
+        mut shown := show(0)
+        while shown >= 0 && self.hidden_calls < 32 { shown = show(0) self.hidden_calls += 1 }
+        self.mouse_dx = 0
+        self.mouse_dy = 0
+        self.clip_mouse()
+        return true
+    }
+
+    pub fun release_mouse(mut self) {
+        restore_mouse(self.user32, self.handle, self.captured, self.hidden_calls)
+        self.captured = false
+        self.hidden_calls = 0
+        self.mouse_dx = 0
+        self.mouse_dy = 0
+    }
+
+    pub fun mouse_captured(self) -> bool => self.captured && self.is_open() && self.is_focused()
+    pub fun mouse_delta_x(self) -> i32 => self.mouse_dx
+    pub fun mouse_delta_y(self) -> i32 => self.mouse_dy
 
     pub fun native_handle(self) -> *u8 { return self.handle }
 

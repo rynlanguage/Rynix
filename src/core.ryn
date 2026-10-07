@@ -1,2 +1,2 @@
 // Rynix-wide versioning and library identity will live in this module.
-pub fun version() -> str => "0.2.0"
+pub fun version() -> str => "0.3.0"

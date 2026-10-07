@@ -5,6 +5,9 @@ pub fun pi() -> f32 => 3.14159265
 pub fun radians(degrees: f32) -> f32 => degrees * pi() / (180.0 as f32)
 pub fun degrees(radians: f32) -> f32 => radians * (180.0 as f32) / pi()
 pub fun lerp(from: f32, to: f32, t: f32) -> f32 => from + (to - from) * t
+pub fun scalar_min(a: f32, b: f32) -> f32 { when a < b { return a } return b }
+pub fun scalar_max(a: f32, b: f32) -> f32 { when a > b { return a } return b }
+pub fun clamp_value(value: f32, low: f32, high: f32) -> f32 => scalar_max(low, scalar_min(value, high))
 
 pub struct Vec2 {
     pub x: f32,
@@ -203,7 +206,7 @@ extend Mat4 {
     }
 
     pub fun perspective(fov_degrees: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-        when aspect == 0.0 || near == far { return Mat4::identity() }
+        when aspect <= (0.0 as f32) || near <= (0.0 as f32) || far <= near || fov_degrees <= (0.0 as f32) || fov_degrees >= (180.0 as f32) { return Mat4::identity() }
         half := fov_degrees * (3.14159265 as f32) / (360.0 as f32)
         focal := (1.0 as f32) / (math::tan(half as f64) as f32)
         vertical := 0.0 - focal

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0
+
+- WM_CLOSE/WM_DESTROY update native window state immediately; explicit close,
+  Guard destruction, and independent windows retain safe lifecycles.
+- Raw Input mouse deltas, capture/release, cursor hiding, clipping, and focus-loss
+  release. Keyboard auto-repeat no longer produces new press edges.
+- FPS camera, camera view/projection/near/far/aspect methods, center rays, AABB
+  and sphere queries, ray/AABB and ray/plane intersections.
+- Shared indexed 3D pipeline for cube, plane, sphere, custom mesh and model;
+  vertex/index buffers, per-object color/material, normals/UV, back-face culling.
+- PNG loading in Ryn through Windows Imaging Component; optimal Vulkan image
+  upload, views, samplers and descriptors with explicit cleanup.
+- Minimal glTF 2.0/GLB loader, external or embedded PNG, material fields,
+  interleaved attributes, unsigned indices and generated missing normals.
+- Ambient/directional Lambert light with inverse-scale/Y-rotation normals.
+- graphics facade resource constructors; compatible old draw_cube and new
+  colored primitive, mesh, textured mesh and model drawing methods.
+- FPS courtyard, CPU camera/assets checks, native lifecycle regression,
+  interactive Raw Input regression, shader sources/generator and test script.
+- Requires the current Ryn compiler FFI/borrow fixes. See README-VALIDATION.md
+  for the distinction from an older installed 0.1.2 compiler.
+
 ## 0.2.0
 
 - Resizing the window rebuilds the swapchain, its views, the depth buffer, and

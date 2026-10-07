@@ -1,0 +1,25 @@
+use rynix::assets
+use rynix::three_d
+use rynix::math
+use rynix::texture
+use rynix::model
+use rynix::graphics
+fun mesh_vertices(mesh: &graphics::Mesh) -> u32 => mesh.vertex_count()
+fun main() -> i32 {
+    cube := graphics::Mesh::cube() sphere := assets::Mesh::sphere(16, 8)
+    when mesh_vertices(&cube) != 24 { return 6 }
+    when cube.vertex_count() != 24 || sphere.index_count() != 768 { return 1 }
+    image := texture::Texture::load("examples/fps_3d/assets/checker.png")
+    echo image.width()
+    when !image.is_ready() || image.width() != 64 || image.height() != 64 { return 2 }
+    gltf := model::Model::load("examples/fps_3d/assets/crate.gltf")
+    echo gltf.vertex_count()
+    when !gltf.is_ready() || gltf.vertex_count() != 24 || gltf.index_count() != 36 { return 3 }
+    glb := model::Model::load("examples/fps_3d/assets/crate.glb")
+    when !glb.is_ready() || glb.vertex_count() != 24 || glb.index_count() != 36 { return 4 }
+    invalid := model::Model::load("examples/fps_3d/assets/invalid.gltf")
+    truncated := model::Model::load("examples/fps_3d/assets/truncated.glb")
+    when invalid.is_ready() || truncated.is_ready() { return 5 }
+    echo "assets CPU smoke passed"
+    return 0
+}

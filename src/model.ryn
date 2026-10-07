@@ -1,0 +1,160 @@
+// glTF 2.0 / GLB: first mesh, first triangle primitive, local coordinates, one material.
+use rynix::assets
+use rynix::texture
+use rynix::file_data
+use rynix::json_data
+use rynix::math
+#[drop(drop_model)]
+pub struct Model { geometry: *assets::MeshData, image: *texture::TextureData, color: u32, metallic: f32, roughness: f32 }
+fun drop_model(value: Model) { assets::release_mesh(value.geometry) texture::release(value.image) }
+pub fun geometry(value: &Model) -> *assets::MeshData => value.geometry
+pub fun image(value: &Model) -> *texture::TextureData => value.image
+pub fun material(value: &Model) -> assets::Material => assets::Material {
+    base_color: math::Color::rgba((value.color & 255) as u8, ((value.color >> 8) & 255) as u8, ((value.color >> 16) & 255) as u8, ((value.color >> 24) & 255) as u8),
+    metallic: value.metallic, roughness: value.roughness,
+}
+fun empty() -> Model => Model { geometry: 0 as *assets::MeshData, image: 0 as *texture::TextureData, color: 4294967295, metallic: 0.0, roughness: 1.0 }
+pub fun u32_at(bytes: *u8, offset: u64) -> u32 => (file_data::byte(bytes, offset) as u32) | ((file_data::byte(bytes, offset + 1) as u32) << 8) | ((file_data::byte(bytes, offset + 2) as u32) << 16) | ((file_data::byte(bytes, offset + 3) as u32) << 24)
+fun float_at(bytes: *u8, offset: u64) -> f32 { pointer := ((bytes as u64) + offset) as *f32 return *pointer }
+struct GltfAccessor { offset: u64, stride: u64, count: u32, component: u32, lanes: u32, valid: bool }
+fun accessor(json: &json_data::JsonData, index: u32, length: u64, lanes: u32) -> GltfAccessor {
+    mut out := GltfAccessor { offset: 0, stride: 0, count: 0, component: 0, lanes: lanes, valid: false }
+    node := json.item(json.member(0, "accessors"), index)
+    when node == 4294967295 || json.member(node, "sparse") != 4294967295 { return out }
+    view := json.item(json.member(0, "bufferViews"), json.integer(json.member(node, "bufferView"), 4294967295))
+    when view == 4294967295 || json.integer(json.member(view, "buffer"), 4294967295) != 0 { return out }
+    out.component = json.integer(json.member(node, "componentType"), 0)
+    out.count = json.integer(json.member(node, "count"), 0)
+    when out.count == 0 || out.count > 3145728 { return out }
+    mut size: u64 = 4
+    when out.component == 5121 { size = 1 } else when out.component == 5123 { size = 2 }
+    else when out.component != 5125 && out.component != 5126 { return out }
+    when lanes > 1 && out.component != 5126 { return out }
+    when lanes == 1 && !json.equal(json.member(node, "type"), "SCALAR") { return out }
+    when lanes == 2 && !json.equal(json.member(node, "type"), "VEC2") { return out }
+    when lanes == 3 && !json.equal(json.member(node, "type"), "VEC3") { return out }
+    normalized := json.member(node, "normalized")
+    when normalized != 4294967295 && json.equal(normalized, "true") { return out }
+    view_start := json.integer(json.member(view, "byteOffset"), 0) as u64
+    view_length := json.integer(json.member(view, "byteLength"), 0) as u64
+    local := json.integer(json.member(node, "byteOffset"), 0) as u64
+    out.stride = json.integer(json.member(view, "byteStride"), (size * (lanes as u64)) as u32) as u64
+    when out.stride < size * (lanes as u64) || out.stride > 252 { return out }
+    end := local + ((out.count - 1) as u64) * out.stride + size * (lanes as u64)
+    when end > view_length || view_start + view_length > length { return out }
+    out.offset = view_start + local out.valid = true
+    return out
+}
+fun vec3_at(bytes: *u8, offset: u64) -> math::Vec3 => math::Vec3::new(float_at(bytes, offset), float_at(bytes, offset + 4), float_at(bytes, offset + 8))
+fun base_component(json: &json_data::JsonData, array: u32, index: u32) -> u32 => (math::clamp_value(json.number(json.item(array, index), 1.0) as f32, 0.0, 1.0) * (255.0 as f32)) as u32
+extend Model {
+    pub fun is_ready(self) -> bool => !pointer_is_null(self.geometry as *u8) && !pointer_is_null(self.image as *u8)
+    pub fun vertex_count(self) -> u32 { when !self.is_ready() { return 0 } return self.geometry.vertex_count }
+    pub fun index_count(self) -> u32 { when !self.is_ready() { return 0 } return self.geometry.index_count }
+    pub fun load(path: str) -> Model {
+        file := file_data::read(path)
+        when file.length == 0 { return empty() }
+        mut json_pointer := file.data mut json_length := file.length mut binary := 0 as *u8 mut binary_length: u64 = 0
+        when file.length >= 12 && u32_at(file.data, 0) == 1179937895 {
+            when u32_at(file.data, 4) != 2 || (u32_at(file.data, 8) as u64) != file.length { return empty() }
+            mut cursor: u64 = 12 mut found_json := false
+            while cursor + 8 <= file.length {
+                length := u32_at(file.data, cursor) as u64 kind := u32_at(file.data, cursor + 4)
+                when cursor + 8 + length > file.length || length % 4 != 0 { return empty() }
+                when kind == 1313821514 && !found_json { json_pointer = ((file.data as u64) + cursor + 8) as *u8 json_length = length found_json = true }
+                when kind == 5130562 { binary = ((file.data as u64) + cursor + 8) as *u8 binary_length = length }
+                cursor += 8 + length
+            }
+            when !found_json || cursor != file.length { return empty() }
+        }
+        json := json_data::parse(json_pointer, json_length)
+        when !json.valid || !json.equal(json.member(json.member(0, "asset"), "version"), "2.0") { return empty() }
+        when json.item(json.member(0, "extensionsRequired"), 0) != 4294967295 { return empty() }
+        mut external := file_data::Bytes { data: 0 as *u8, length: 0 }
+        buffer_node := json.item(json.member(0, "buffers"), 0)
+        uri := json.text(json.member(buffer_node, "uri"))
+        when uri.len() > 0 {
+            when uri.starts_with("data:") || uri.contains("://") { return empty() }
+            resolved := file_data::relative(path, uri)
+            external = file_data::read(resolved)
+            binary = external.data binary_length = external.length
+        }
+        when pointer_is_null(binary) || (json.integer(json.member(buffer_node, "byteLength"), 4294967295) as u64) > binary_length { return empty() }
+        mesh_node := json.item(json.member(0, "meshes"), 0)
+        primitive := json.item(json.member(mesh_node, "primitives"), 0)
+        when primitive == 4294967295 || json.integer(json.member(primitive, "mode"), 4) != 4 { return empty() }
+        attributes := json.member(primitive, "attributes")
+        positions := accessor(&json, json.integer(json.member(attributes, "POSITION"), 4294967295), binary_length, 3)
+        normals := accessor(&json, json.integer(json.member(attributes, "NORMAL"), 4294967295), binary_length, 3)
+        uv := accessor(&json, json.integer(json.member(attributes, "TEXCOORD_0"), 4294967295), binary_length, 2)
+        index_node := json.member(primitive, "indices")
+        indices := accessor(&json, json.integer(index_node, 4294967295), binary_length, 1)
+        when !positions.valid || positions.count > 1048576 { return empty() }
+        when json.member(attributes, "NORMAL") != 4294967295 && !normals.valid { return empty() }
+        when json.member(attributes, "TEXCOORD_0") != 4294967295 && !uv.valid { return empty() }
+        when normals.valid && normals.count != positions.count { return empty() }
+        when uv.valid && uv.count != positions.count { return empty() }
+        when index_node != 4294967295 && !indices.valid { return empty() }
+        when indices.valid && indices.component == 5126 { return empty() }
+        mut index_count := positions.count when indices.valid { index_count = indices.count }
+        when index_count % 3 != 0 { return empty() }
+        geometry := assets::make_mesh(positions.count, index_count)
+        when pointer_is_null(geometry as *u8) { return empty() }
+        mut i: u32 = 0
+        while i < positions.count {
+            position := vec3_at(binary, positions.offset + (i as u64) * positions.stride)
+            mut normal := math::Vec3::ZERO mut texcoord := math::Vec2::new(0.0, 0.0)
+            when normals.valid { normal = vec3_at(binary, normals.offset + (i as u64) * normals.stride).normalized() }
+            when uv.valid { offset := uv.offset + (i as u64) * uv.stride texcoord = math::Vec2::new(float_at(binary, offset), float_at(binary, offset + 4)) }
+            out := assets::vertex_pointer(geometry, i) *out = assets::Vertex::new(position, normal, texcoord) i += 1
+        }
+        i = 0
+        while i < index_count {
+            mut value := i
+            when indices.valid {
+                offset := indices.offset + (i as u64) * indices.stride
+                when indices.component == 5121 { value = file_data::byte(binary, offset) as u32 }
+                else when indices.component == 5123 { value = (file_data::byte(binary, offset) as u32) | ((file_data::byte(binary, offset + 1) as u32) << 8) }
+                else { value = u32_at(binary, offset) }
+            }
+            when value >= positions.count { assets::release_mesh(geometry) return empty() }
+            out := assets::index_pointer(geometry, i) *out = value i += 1
+        }
+        when !normals.valid {
+            i = 0
+            while i < index_count {
+                ai := assets::index_pointer(geometry, i) bi := assets::index_pointer(geometry, i + 1) ci := assets::index_pointer(geometry, i + 2)
+                a := assets::vertex_pointer(geometry, *ai) b := assets::vertex_pointer(geometry, *bi) c := assets::vertex_pointer(geometry, *ci)
+                pa := math::Vec3::new(a.x, a.y, a.z) pb := math::Vec3::new(b.x, b.y, b.z) pc := math::Vec3::new(c.x, c.y, c.z)
+                normal := pb.sub(pa).cross(pc.sub(pa))
+                a.nx += normal.x a.ny += normal.y a.nz += normal.z b.nx += normal.x b.ny += normal.y b.nz += normal.z c.nx += normal.x c.ny += normal.y c.nz += normal.z
+                i += 3
+            }
+            i = 0
+            while i < positions.count { vertex := assets::vertex_pointer(geometry, i) normal := math::Vec3::new(vertex.nx, vertex.ny, vertex.nz).normalized() vertex.nx = normal.x vertex.ny = normal.y vertex.nz = normal.z i += 1 }
+        }
+        material_node := json.item(json.member(0, "materials"), json.integer(json.member(primitive, "material"), 4294967295))
+        pbr := json.member(material_node, "pbrMetallicRoughness")
+        factor := json.member(pbr, "baseColorFactor")
+        color := base_component(&json, factor, 0) | (base_component(&json, factor, 1) << 8) | (base_component(&json, factor, 2) << 16) | (base_component(&json, factor, 3) << 24)
+        mut image := texture::Texture::white()
+        texture_node := json.member(pbr, "baseColorTexture")
+        when texture_node != 4294967295 {
+            tex := json.item(json.member(0, "textures"), json.integer(json.member(texture_node, "index"), 4294967295))
+            image_node := json.item(json.member(0, "images"), json.integer(json.member(tex, "source"), 4294967295))
+            image_uri := json.text(json.member(image_node, "uri"))
+            when image_uri.len() > 0 {
+                when image_uri.starts_with("data:") || image_uri.contains("://") { assets::release_mesh(geometry) return empty() }
+                resolved := file_data::relative(path, image_uri) image = texture::Texture::load(resolved)
+            } else {
+                view := json.item(json.member(0, "bufferViews"), json.integer(json.member(image_node, "bufferView"), 4294967295))
+                start := json.integer(json.member(view, "byteOffset"), 0) as u64 length := json.integer(json.member(view, "byteLength"), 0) as u64
+                when view == 4294967295 || json.integer(json.member(view, "buffer"), 4294967295) != 0 || start + length > binary_length { assets::release_mesh(geometry) return empty() }
+                image = texture::decode(((binary as u64) + start) as *u8, length)
+            }
+        }
+        when !image.is_ready() { assets::release_mesh(geometry) return empty() }
+        source := image.storage() texture::retain(source)
+        return Model { geometry: geometry, image: source, color: color, metallic: math::clamp_value(json.number(json.member(pbr, "metallicFactor"), 1.0) as f32, 0.0, 1.0), roughness: math::clamp_value(json.number(json.member(pbr, "roughnessFactor"), 1.0) as f32, 0.0, 1.0) }
+    }
+}

@@ -1,0 +1,24 @@
+// Internal Windows heap access. Public resources own these allocations through Ryn Guard.
+type HeapFn = extern "C" fun() -> *u8
+type AllocFn = extern "C" fun(*u8, u32, u64) -> *u8
+type FreeFn = extern "C" fun(*u8, u32, *u8) -> i32
+
+pub fun allocate(bytes: u64) -> *u8 {
+    when bytes == 0 { return 0 as *u8 }
+    library := load_library("kernel32.dll")
+    when pointer_is_null(library) { return 0 as *u8 }
+    heap: HeapFn = load_symbol(library, "GetProcessHeap") as HeapFn
+    alloc: AllocFn = load_symbol(library, "HeapAlloc") as AllocFn
+    result := alloc(heap(), 8, bytes)
+    unload_library(library)
+    return result
+}
+
+pub fun release(pointer: *u8) {
+    when pointer_is_null(pointer) { return }
+    library := load_library("kernel32.dll")
+    heap: HeapFn = load_symbol(library, "GetProcessHeap") as HeapFn
+    free: FreeFn = load_symbol(library, "HeapFree") as FreeFn
+    free(heap(), 0, pointer)
+    unload_library(library)
+}

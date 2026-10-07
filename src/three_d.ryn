@@ -1,16 +1,20 @@
 // A camera describes where a 3D frame is viewed from. Meshes stay in the graphics module.
 use rynix::math
+use rynix::window
 
 pub struct Camera {
     pub eye: math::Vec3,
     pub target: math::Vec3,
     pub up: math::Vec3,
     pub fov_degrees: f32,
+    pub aspect: f32,
+    pub near_plane: f32,
+    pub far_plane: f32,
 }
 
 extend Camera {
     pub fun new(eye: math::Vec3, target: math::Vec3, up: math::Vec3, fov_degrees: f32) -> Camera {
-        return Camera { eye: eye, target: target, up: up, fov_degrees: fov_degrees }
+        return Camera { eye: eye, target: target, up: up, fov_degrees: fov_degrees, aspect: 1.7777778, near_plane: 0.1, far_plane: 1000.0 }
     }
 
     pub fun move_by(mut self, delta: math::Vec3) {
@@ -21,4 +25,142 @@ extend Camera {
     pub fun look_toward(mut self, forward: math::Vec3) {
         self.target = self.eye.add(forward)
     }
+
+    pub fun view_matrix(self) -> math::Mat4 => math::Mat4::look_at(self.eye, self.target, self.up)
+    pub fun projection_matrix(self) -> math::Mat4 => math::Mat4::perspective(self.fov_degrees, self.aspect, self.near_plane, self.far_plane)
+    pub fun view_projection_matrix(self) -> math::Mat4 => self.projection_matrix().mul(self.view_matrix())
+    pub fun view_projection_for(self, width: u32, height: u32) -> math::Mat4 {
+        when width == 0 || height == 0 { return math::Mat4::identity() }
+        aspect := (width as f32) / (height as f32)
+        return math::Mat4::perspective(self.fov_degrees, aspect, self.near_plane, self.far_plane).mul(self.view_matrix())
+    }
+    pub fun center_ray(self) -> Ray => Ray::new(self.eye, self.target.sub(self.eye))
+}
+
+pub struct FpsCamera {
+    eye: math::Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub speed: f32,
+    pub sprint_speed: f32,
+    pub sensitivity: f32,
+    pub fov_degrees: f32,
+    pub near_plane: f32,
+    pub far_plane: f32,
+}
+
+extend FpsCamera {
+    pub fun new(position: math::Vec3) -> FpsCamera => FpsCamera {
+        eye: position, yaw: 0.0, pitch: 0.0, speed: 5.0, sprint_speed: 10.0,
+        sensitivity: 0.12, fov_degrees: 60.0, near_plane: 0.1, far_plane: 1000.0,
+    }
+    // Angles and sensitivity are degrees. Zero yaw looks down -Z.
+    pub fun forward(self) -> math::Vec3 => math::Vec3::from_angles(math::pi() - math::radians(self.yaw), math::radians(self.pitch))
+    pub fun right(self) -> math::Vec3 {
+        direction := self.forward()
+        return direction.cross(math::Vec3::UP).normalized()
+    }
+    pub fun position(self) -> math::Vec3 => self.eye
+    pub fun set_position(mut self, position: math::Vec3) { self.eye = position }
+    pub fun set_angles(mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw
+        self.pitch = math::clamp_value(pitch, -89.0, 89.0)
+    }
+    pub fun look_by(mut self, dx: f32, dy: f32) {
+        self.yaw += dx * self.sensitivity
+        self.pitch = math::clamp_value(self.pitch - dy * self.sensitivity, -89.0, 89.0)
+    }
+    pub fun move_local(mut self, forward: f32, right: f32, up: f32, sprint: bool, dt: f32) {
+        mut movement := self.forward().mul(forward).add(self.right().mul(right)).add(math::Vec3::UP.mul(up))
+        when movement.length_squared() <= (0.000001 as f32) || dt <= (0.0 as f32) { return }
+        mut speed := self.speed
+        when sprint { speed = self.sprint_speed }
+        movement = movement.normalized().mul(speed * dt)
+        self.eye = self.eye.add(movement)
+    }
+    pub fun update(mut self, input: &window::Window, dt: f32) {
+        when !input.is_focused() { return }
+        when input.mouse_captured() { self.look_by(input.mouse_delta_x() as f32, input.mouse_delta_y() as f32) }
+        mut forward: f32 = 0.0
+        mut right: f32 = 0.0
+        mut up: f32 = 0.0
+        when input.key_down(window::KeyCode::W) { forward += 1.0 }
+        when input.key_down(window::KeyCode::S) { forward -= 1.0 }
+        when input.key_down(window::KeyCode::D) { right += 1.0 }
+        when input.key_down(window::KeyCode::A) { right -= 1.0 }
+        when input.key_down(window::KeyCode::SPACE) { up += 1.0 }
+        when input.key_down(window::KeyCode::CONTROL) { up -= 1.0 }
+        self.move_local(forward, right, up, input.key_down(window::KeyCode::SHIFT), dt)
+    }
+    pub fun camera(self) -> Camera {
+        mut result := Camera::new(self.eye, self.eye.add(self.forward()), math::Vec3::UP, self.fov_degrees)
+        result.near_plane = self.near_plane
+        result.far_plane = self.far_plane
+        return result
+    }
+    pub fun center_ray(self) -> Ray => Ray::new(self.eye, self.forward())
+}
+
+pub struct DirectionalLight { pub direction: math::Vec3, pub color: math::Color, pub intensity: f32 }
+extend DirectionalLight {
+    pub fun new(direction: math::Vec3, color: math::Color, intensity: f32) -> DirectionalLight => DirectionalLight { direction: direction, color: color, intensity: intensity }
+}
+pub struct AmbientLight { pub color: math::Color, pub intensity: f32 }
+extend AmbientLight {
+    pub fun new(color: math::Color, intensity: f32) -> AmbientLight => AmbientLight { color: color, intensity: intensity }
+}
+
+pub struct Aabb { pub min: math::Vec3, pub max: math::Vec3 }
+extend Aabb {
+    pub fun new(min: math::Vec3, max: math::Vec3) -> Aabb => Aabb { min: min, max: max }
+    pub fun is_valid(self) -> bool => self.min.x <= self.max.x && self.min.y <= self.max.y && self.min.z <= self.max.z
+    pub fun contains(self, point: math::Vec3) -> bool => self.is_valid() && point.x >= self.min.x && point.x <= self.max.x && point.y >= self.min.y && point.y <= self.max.y && point.z >= self.min.z && point.z <= self.max.z
+    pub fun intersects(self, other: Aabb) -> bool => self.is_valid() && other.is_valid() && self.min.x <= other.max.x && self.max.x >= other.min.x && self.min.y <= other.max.y && self.max.y >= other.min.y && self.min.z <= other.max.z && self.max.z >= other.min.z
+}
+pub struct SphereCollider { pub center: math::Vec3, pub radius: f32 }
+extend SphereCollider {
+    pub fun new(center: math::Vec3, radius: f32) -> SphereCollider => SphereCollider { center: center, radius: radius }
+    pub fun contains(self, point: math::Vec3) -> bool => self.radius >= (0.0 as f32) && self.center.sub(point).length_squared() <= self.radius * self.radius
+    pub fun intersects(self, other: SphereCollider) -> bool {
+        when self.radius < (0.0 as f32) || other.radius < (0.0 as f32) { return false }
+        radius := self.radius + other.radius
+        return self.center.sub(other.center).length_squared() <= radius * radius
+    }
+}
+pub struct Ray { pub origin: math::Vec3, pub direction: math::Vec3 }
+extend Ray {
+    pub fun new(origin: math::Vec3, direction: math::Vec3) -> Ray {
+        mut unit := math::Vec3::ZERO
+        when direction.length_squared() > (0.00000001 as f32) { unit = direction.normalized() }
+        return Ray { origin: origin, direction: unit }
+    }
+    pub fun at(self, distance: f32) -> math::Vec3 => self.origin.add(self.direction.mul(distance))
+    pub fun intersect_plane(self, point: math::Vec3, normal: math::Vec3) -> Option<f32> {
+        denominator := self.direction.dot(normal)
+        when denominator > (-0.000001 as f32) && denominator < (0.000001 as f32) { return Option::None }
+        distance := point.sub(self.origin).dot(normal) / denominator
+        when distance < (0.0 as f32) { return Option::None }
+        return Option::Some(distance)
+    }
+    pub fun intersect_aabb(self, box: Aabb) -> Option<f32> {
+        when self.direction.length_squared() < (0.00000001 as f32) { return Option::None }
+        x := slab(self.origin.x, self.direction.x, box.min.x, box.max.x)
+        y := slab(self.origin.y, self.direction.y, box.min.y, box.max.y)
+        z := slab(self.origin.z, self.direction.z, box.min.z, box.max.z)
+        when !x.valid || !y.valid || !z.valid { return Option::None }
+        near := math::scalar_max(math::scalar_max(x.near, y.near), z.near)
+        far := math::scalar_min(math::scalar_min(x.far, y.far), z.far)
+        when near > far || far < (0.0 as f32) { return Option::None }
+        return Option::Some(math::scalar_max(near, 0.0))
+    }
+}
+struct Slab { near: f32, far: f32, valid: bool }
+fun slab(origin: f32, direction: f32, min: f32, max: f32) -> Slab {
+    when min > max { return Slab { near: 0.0, far: 0.0, valid: false } }
+    when direction == (0.0 as f32) {
+        return Slab { near: -1.0e30, far: 1.0e30, valid: origin >= min && origin <= max }
+    }
+    a := (min - origin) / direction
+    b := (max - origin) / direction
+    return Slab { near: math::scalar_min(a, b), far: math::scalar_max(a, b), valid: true }
 }

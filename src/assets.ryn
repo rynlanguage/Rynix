@@ -1,0 +1,151 @@
+// Renderer-independent CPU geometry. The GPU cache retains allocations while commands use them.
+use rynix::math
+use rynix::memory
+
+#[repr(C)]
+pub struct Vertex { pub x: f32, pub y: f32, pub z: f32, pub nx: f32, pub ny: f32, pub nz: f32, pub u: f32, pub v: f32 }
+extend Vertex {
+    pub fun new(position: math::Vec3, normal: math::Vec3, uv: math::Vec2) -> Vertex => Vertex {
+        x: position.x, y: position.y, z: position.z, nx: normal.x, ny: normal.y, nz: normal.z, u: uv.x, v: uv.y,
+    }
+}
+#[repr(C)]
+pub struct MeshData { pub refs: u32, pub vertex_count: u32, pub index_count: u32, pub vertices: *u8, pub indices: *u8 }
+#[drop(drop_mesh)]
+pub struct Mesh { data: *MeshData }
+
+pub fun retain_mesh(data: *MeshData) { when !pointer_is_null(data as *u8) { data.refs += 1 } }
+pub fun release_mesh(data: *MeshData) {
+    when pointer_is_null(data as *u8) { return }
+    data.refs -= 1
+    when data.refs == 0 {
+        memory::release(data.vertices)
+        memory::release(data.indices)
+        memory::release(data as *u8)
+    }
+}
+fun drop_mesh(mesh: Mesh) { release_mesh(mesh.data) }
+pub fun vertex_pointer(data: *MeshData, index: u32) -> *Vertex => ((data.vertices as u64) + (index as u64) * sizeof(Vertex)) as *Vertex
+pub fun index_pointer(data: *MeshData, index: u32) -> *u32 => ((data.indices as u64) + (index as u64) * 4) as *u32
+pub fun make_mesh(vertices: u32, indices: u32) -> *MeshData {
+    when vertices == 0 || indices == 0 || vertices > 1048576 || indices > 3145728 { return 0 as *MeshData }
+    data := memory::allocate(sizeof(MeshData)) as *MeshData
+    when pointer_is_null(data as *u8) { return data }
+    data.refs = 1
+    data.vertex_count = vertices
+    data.index_count = indices
+    data.vertices = memory::allocate((vertices as u64) * sizeof(Vertex))
+    data.indices = memory::allocate((indices as u64) * 4)
+    when pointer_is_null(data.vertices) || pointer_is_null(data.indices) { release_mesh(data) return 0 as *MeshData }
+    return data
+}
+pub fun own_mesh(data: *MeshData) -> Mesh => Mesh { data: data }
+// Internal access is kept out of the graphics facade documentation.
+pub fun mesh_data(mesh: &Mesh) -> *MeshData => mesh.data
+
+extend Mesh {
+    pub fun storage(self) -> *MeshData => self.data
+    pub fun new(vertices: &[Vertex], indices: &[u32]) -> Mesh {
+        data := make_mesh(vertices.len() as u32, indices.len() as u32)
+        when pointer_is_null(data as *u8) { return Mesh { data: data } }
+        mut index: u32 = 0
+        while index < data.vertex_count { out := vertex_pointer(data, index) *out = vertices[index as u64] index += 1 }
+        index = 0
+        while index < data.index_count {
+            value := indices[index as u64]
+            when value >= data.vertex_count { release_mesh(data) return Mesh { data: 0 as *MeshData } }
+            out := index_pointer(data, index)
+            *out = value
+            index += 1
+        }
+        return Mesh { data: data }
+    }
+    pub fun is_ready(self) -> bool => !pointer_is_null(self.data as *u8)
+    pub fun vertex_count(self) -> u32 { when !self.is_ready() { return 0 } return self.data.vertex_count }
+    pub fun index_count(self) -> u32 { when !self.is_ready() { return 0 } return self.data.index_count }
+    pub fun vertex(self, index: u32) -> Vertex {
+        when !self.is_ready() || index >= self.data.vertex_count { return Vertex::new(math::Vec3::ZERO, math::Vec3::UP, math::Vec2::new(0.0, 0.0)) }
+        pointer := vertex_pointer(self.data, index)
+        return *pointer
+    }
+    pub fun index(self, index: u32) -> u32 { when !self.is_ready() || index >= self.data.index_count { return 0 } pointer := index_pointer(self.data, index) return *pointer }
+    pub fun plane() -> Mesh {
+        vertices := [
+            Vertex::new(math::Vec3::new(-0.5, 0.0, -0.5), math::Vec3::UP, math::Vec2::new(0.0, 0.0)),
+            Vertex::new(math::Vec3::new(-0.5, 0.0, 0.5), math::Vec3::UP, math::Vec2::new(0.0, 1.0)),
+            Vertex::new(math::Vec3::new(0.5, 0.0, 0.5), math::Vec3::UP, math::Vec2::new(1.0, 1.0)),
+            Vertex::new(math::Vec3::new(0.5, 0.0, -0.5), math::Vec3::UP, math::Vec2::new(1.0, 0.0)),
+        ]
+        indices: [u32; 6] = [0, 1, 2, 0, 2, 3]
+        return Mesh::new(vertices, indices)
+    }
+    pub fun cube() -> Mesh {
+        data := make_mesh(24, 36)
+        when pointer_is_null(data as *u8) { return own_mesh(data) }
+        mut face: u32 = 0
+        while face < 6 {
+            mut normal := math::Vec3::new(0.0, 0.0, 1.0)
+            mut right := math::Vec3::new(1.0, 0.0, 0.0)
+            mut up := math::Vec3::UP
+            when face == 1 { normal = math::Vec3::new(0.0, 0.0, -1.0) right = math::Vec3::new(-1.0, 0.0, 0.0) }
+            when face == 2 { normal = math::Vec3::new(1.0, 0.0, 0.0) right = math::Vec3::new(0.0, 0.0, -1.0) }
+            when face == 3 { normal = math::Vec3::new(-1.0, 0.0, 0.0) right = math::Vec3::new(0.0, 0.0, 1.0) }
+            when face == 4 { normal = math::Vec3::UP right = math::Vec3::new(1.0, 0.0, 0.0) up = math::Vec3::new(0.0, 0.0, -1.0) }
+            when face == 5 { normal = math::Vec3::new(0.0, -1.0, 0.0) right = math::Vec3::new(1.0, 0.0, 0.0) up = math::Vec3::new(0.0, 0.0, 1.0) }
+            mut corner: u32 = 0
+            while corner < 4 {
+                mut u: f32 = 0.0
+                mut v: f32 = 0.0
+                when corner == 1 || corner == 2 { u = 1.0 }
+                when corner == 2 || corner == 3 { v = 1.0 }
+                position := normal.mul(0.5).add(right.mul(u - (0.5 as f32))).add(up.mul(v - (0.5 as f32)))
+                pointer := vertex_pointer(data, face * 4 + corner)
+                *pointer = Vertex::new(position, normal, math::Vec2::new(u, v))
+                corner += 1
+            }
+            mut i: u32 = 0
+            pattern: [u32; 6] = [0, 1, 2, 0, 2, 3]
+            while i < 6 { pointer := index_pointer(data, face * 6 + i) *pointer = face * 4 + pattern[i as u64] i += 1 }
+            face += 1
+        }
+        return own_mesh(data)
+    }
+    pub fun sphere(segments: u32, rings: u32) -> Mesh {
+        when segments < 3 || rings < 2 || segments > 128 || rings > 128 { return own_mesh(0 as *MeshData) }
+        data := make_mesh((segments + 1) * (rings + 1), segments * rings * 6)
+        when pointer_is_null(data as *u8) { return own_mesh(data) }
+        mut y: u32 = 0
+        while y <= rings {
+            mut x: u32 = 0
+            while x <= segments {
+                u := (x as f32) / (segments as f32)
+                v := (y as f32) / (rings as f32)
+                normal := math::Vec3::from_angles(u * math::pi() * (2.0 as f32), (0.5 as f32) * math::pi() - v * math::pi())
+                out := vertex_pointer(data, y * (segments + 1) + x)
+                *out = Vertex::new(normal, normal, math::Vec2::new(u, v))
+                x += 1
+            }
+            y += 1
+        }
+        y = 0
+        mut cursor: u32 = 0
+        while y < rings {
+            mut x: u32 = 0
+            while x < segments {
+                a := y * (segments + 1) + x
+                b := a + segments + 1
+                values: [u32; 6] = [a, b, a + 1, a + 1, b, b + 1]
+                mut i: u32 = 0
+                while i < 6 { out := index_pointer(data, cursor) *out = values[i as u64] cursor += 1 i += 1 }
+                x += 1
+            }
+            y += 1
+        }
+        return own_mesh(data)
+    }
+}
+
+pub struct Material { pub base_color: math::Color, pub metallic: f32, pub roughness: f32 }
+extend Material {
+    pub fun new(color: math::Color) -> Material => Material { base_color: color, metallic: 0.0, roughness: 1.0 }
+}

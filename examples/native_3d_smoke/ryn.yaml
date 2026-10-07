@@ -1,0 +1,8 @@
+name: rynix-native-3d-smoke
+version: 0.3.0
+owner: rynix
+dependencies:
+  rynix:
+    path: ../..
+build:
+  optimize: speed

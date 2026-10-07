@@ -3,6 +3,47 @@
 use rynix::math
 use rynix::three_d
 use rynix::vk_data
+use rynix::assets
+use rynix::texture
+use rynix::mesh_backend
+use rynix::mesh_vertex
+use rynix::mesh_fragment
+use rynix::model
+#[repr(C)]
+struct MeshPush { mvp: math::Mat4, yaw: f32, sx: f32, sy: f32, sz: f32, sun_x: f32, sun_y: f32, sun_z: f32, sun_intensity: f32, ambient_r: f32, ambient_g: f32, ambient_b: f32, ambient_intensity: f32, base_color: u32, sun_color: u32, pad0: u32, pad1: u32 }
+type MeshBindVertexFn = extern "C" fun(*u8, u32, u32, **u8, *u64)
+type MeshBindIndexFn = extern "C" fun(*u8, *u8, u64, u32)
+type MeshDrawIndexedFn = extern "C" fun(*u8, u32, u32, u32, i32, u32)
+type MeshBindSetsFn = extern "C" fun(*u8, u32, *u8, u32, u32, **u8, u32, *u8)
+fun packed_color(color: math::Color) -> u32 => (color.r as u32) | ((color.g as u32) << 8) | ((color.b as u32) << 16) | ((color.a as u32) << 24)
+
+// Public facade constructors; CPU storage and Vulkan interop keep separate ownership.
+namespace graphics;
+pub type Mesh = assets::Mesh
+pub type Vertex = assets::Vertex
+pub type Material = assets::Material
+pub type Texture = texture::Texture
+pub type Model = model::Model
+namespace;
+extend Mesh {
+    pub fun new(vertices: &[assets::Vertex], indices: &[u32]) -> assets::Mesh => assets::Mesh::new(vertices, indices)
+    pub fun cube() -> assets::Mesh => assets::Mesh::cube()
+    pub fun plane() -> assets::Mesh => assets::Mesh::plane()
+    pub fun sphere(segments: u32, rings: u32) -> assets::Mesh => assets::Mesh::sphere(segments, rings)
+}
+extend Vertex {
+    pub fun new(position: math::Vec3, normal: math::Vec3, uv: math::Vec2) -> assets::Vertex => assets::Vertex::new(position, normal, uv)
+}
+extend Material {
+    pub fun new(color: math::Color) -> assets::Material => assets::Material::new(color)
+}
+extend Texture {
+    pub fun load(path: str) -> texture::Texture => texture::Texture::load(path)
+    pub fun white() -> texture::Texture => texture::Texture::white()
+}
+extend Model {
+    pub fun load(path: str) -> model::Model => model::Model::load(path)
+}
 
 #[repr(C)]
 struct VkClientRect { left: i32, top: i32, right: i32, bottom: i32 }
@@ -179,6 +220,12 @@ struct VkStageInfo { s_type: u32, next: *u8, flags: u32, stage: u32, module: *u8
 struct VkStagePair { vertex: VkStageInfo, fragment: VkStageInfo }
 #[repr(C)]
 struct VkVertexInfo { s_type: u32, next: *u8, flags: u32, binding_count: u32, bindings: *u8, attribute_count: u32, attributes: *u8 }
+#[repr(C)]
+struct VkVertexBinding { binding: u32, stride: u32, rate: u32 }
+#[repr(C)]
+struct VkAttribute { location: u32, binding: u32, format: u32, offset: u32 }
+#[repr(C)]
+struct VkAttributes { position: VkAttribute, normal: VkAttribute, uv: VkAttribute }
 #[repr(C)]
 struct VkAssemblyInfo { s_type: u32, next: *u8, flags: u32, topology: u32, restart: u32 }
 #[repr(C)]
@@ -1085,12 +1132,12 @@ fun make_fragment_shader(device: *u8, create: *u8) -> *u8 {
 
 fun make_cube_vertex_shader(device: *u8, create: *u8) -> *u8 {
     when pointer_is_null(create) { return null_handle() }
-    mut words := vk_data::cube_vertex_shader()
+    mut words := mesh_vertex::shader()
     mut info := VkShaderInfo {
         s_type: 16,
         next: null_handle(),
         flags: 0,
-        code_size: vk_data::cube_vertex_code_bytes(),
+        code_size: mesh_vertex::size(),
         code: (&raw words) as *u8,
     }
     call: VkCreateShaderFn = create as VkCreateShaderFn
@@ -1101,12 +1148,12 @@ fun make_cube_vertex_shader(device: *u8, create: *u8) -> *u8 {
 
 fun make_cube_fragment_shader(device: *u8, create: *u8) -> *u8 {
     when pointer_is_null(create) { return null_handle() }
-    mut words := vk_data::cube_fragment_shader()
+    mut words := mesh_fragment::shader()
     mut info := VkShaderInfo {
         s_type: 16,
         next: null_handle(),
         flags: 0,
-        code_size: vk_data::cube_fragment_code_bytes(),
+        code_size: mesh_fragment::size(),
         code: (&raw words) as *u8,
     }
     call: VkCreateShaderFn = create as VkCreateShaderFn
@@ -1115,7 +1162,7 @@ fun make_cube_fragment_shader(device: *u8, create: *u8) -> *u8 {
     return created(result, out)
 }
 
-fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vertex: *u8, fragment: *u8, depth_test: u32, depth_write: u32, depth_compare: u32, push_size: u32) -> VkPipelineBundle {
+fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vertex: *u8, fragment: *u8, depth_test: u32, depth_write: u32, depth_compare: u32, push_size: u32, set_layout: *u8) -> VkPipelineBundle {
     mut bundle := VkPipelineBundle { pipeline: null_handle(), layout: null_handle() }
     when pointer_is_null(layout_fn) || pointer_is_null(pipeline_fn) { return bundle }
     mut entry := vk_data::entry_main_name()
@@ -1149,6 +1196,16 @@ fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vert
         attribute_count: 0,
         attributes: null_handle(),
     }
+    mut binding := VkVertexBinding { binding: 0, stride: 32, rate: 0 }
+    mut attributes := VkAttributes {
+        position: VkAttribute { location: 0, binding: 0, format: 106, offset: 0 },
+        normal: VkAttribute { location: 1, binding: 0, format: 106, offset: 12 },
+        uv: VkAttribute { location: 2, binding: 0, format: 103, offset: 24 },
+    }
+    when push_size == 128 {
+        vertex_info.binding_count = 1 vertex_info.bindings = (&raw binding) as *u8
+        vertex_info.attribute_count = 3 vertex_info.attributes = (&raw attributes) as *u8
+    }
     mut assembly := VkAssemblyInfo { s_type: 20, next: null_handle(), flags: 0, topology: 3, restart: 0 }
     mut viewport_state := VkViewportInfo {
         s_type: 22,
@@ -1174,6 +1231,7 @@ fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vert
         bias_slope: 0.0,
         line_width: 1.0,
     }
+    when push_size == 128 { raster.cull = 2 raster.front = 0 }
     mut multi := VkSampleInfo {
         s_type: 24,
         next: null_handle(),
@@ -1240,6 +1298,8 @@ fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vert
         push_count: 1,
         push: (&raw push_range) as *u8,
     }
+    mut descriptor_layout := set_layout
+    when !pointer_is_null(set_layout) { layout_info.set_count = 1 layout_info.sets = (&raw descriptor_layout) as *u8 }
     layout_call: VkCreateLayoutFn = layout_fn as VkCreateLayoutFn
     mut layout_out := VkOut { value: null_handle() }
     layout_result := layout_call(device, &raw mut layout_info, null_handle(), &raw mut layout_out)
@@ -1403,6 +1463,7 @@ fun submit_present(
 #[drop(drop_gpu)]
 pub struct Gpu {
     library: *u8,
+    resources: *mesh_backend::Context,
     get_instance: *u8,
     get_device: *u8,
     instance: *u8,
@@ -1465,6 +1526,7 @@ pub struct Gpu {
 fun blank_gpu(library: *u8) -> Gpu {
     return Gpu {
         library: library,
+        resources: 0 as *mesh_backend::Context,
         get_instance: null_handle(),
         get_device: null_handle(),
         instance: null_handle(),
@@ -1533,6 +1595,7 @@ fun drop_gpu(gpu: Gpu) {
         wait: VkDeviceWaitFn = wait_fn as VkDeviceWaitFn
         wait(gpu.device)
     }
+    mesh_backend::close(gpu.resources)
     destroy_fb := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_framebuffer_name())
     destroy_view := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_image_view_name())
     destroy_swap := resolve_device_fn(gpu.get_device, gpu.device, gpu.get_instance, gpu.instance, vk_data::destroy_swapchain_name())
@@ -1588,6 +1651,7 @@ fun drop_gpu(gpu: Gpu) {
 #[drop(drop_frame)]
 pub struct Frame {
     command: *u8,
+    resources: *mesh_backend::Context,
     queue: *u8,
     swapchain: *u8,
     image_available: *u8,
@@ -1612,6 +1676,7 @@ pub struct Frame {
 fun inert_frame() -> Frame {
     return Frame {
         command: null_handle(),
+        resources: 0 as *mesh_backend::Context,
         queue: null_handle(),
         swapchain: null_handle(),
         image_available: null_handle(),
@@ -1658,6 +1723,20 @@ fun drop_frame(frame: Frame) {
 }
 
 extend Gpu {
+    pub fun set_ambient_light(self, light: three_d::AmbientLight) {
+        when pointer_is_null(self.resources as *u8) { return }
+        context := self.resources
+        context.ambient_r = channel(light.color.r) context.ambient_g = channel(light.color.g) context.ambient_b = channel(light.color.b)
+        context.ambient_intensity = math::scalar_max(light.intensity, 0.0)
+    }
+    pub fun set_directional_light(self, light: three_d::DirectionalLight) {
+        when pointer_is_null(self.resources as *u8) { return }
+        direction := light.direction.normalized()
+        context := self.resources
+        when direction.length_squared() == (0.0 as f32) { context.sun_x = 0.0 context.sun_y = -1.0 context.sun_z = 0.0 context.sun_intensity = 0.0 return }
+        context.sun_x = direction.x context.sun_y = direction.y context.sun_z = direction.z
+        context.sun_intensity = math::scalar_max(light.intensity, 0.0) context.sun_color = packed_color(light.color)
+    }
     // Opens a Vulkan device for this Win32 window. Drawing stays on the frames begin() returns.
     pub fun open(hwnd: *u8) -> Gpu {
         when pointer_is_null(hwnd) { return blank_gpu(null_handle()) }
@@ -1713,14 +1792,16 @@ extend Gpu {
         when pointer_is_null(gpu.vertex_shader) || pointer_is_null(gpu.fragment_shader) { return gpu }
         layout_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_layout_name())
         pipeline_fn := vk_data::resolve(gpu.get_device, gpu.device, vk_data::create_pipelines_name())
-        bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.vertex_shader, gpu.fragment_shader, 0, 0, 1, 48)
+        bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.vertex_shader, gpu.fragment_shader, 0, 0, 1, 48, null_handle())
         gpu.layout = bundle.layout
         gpu.pipeline = bundle.pipeline
         when pointer_is_null(gpu.pipeline) || pointer_is_null(gpu.layout) { return gpu }
         gpu.cube_vertex = make_cube_vertex_shader(gpu.device, create_shader)
         gpu.cube_fragment = make_cube_fragment_shader(gpu.device, create_shader)
         when pointer_is_null(gpu.cube_vertex) || pointer_is_null(gpu.cube_fragment) { return gpu }
-        cube_bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.cube_vertex, gpu.cube_fragment, 1, 1, 1, 64)
+        gpu.resources = mesh_backend::open(gpu.get_device, gpu.device, gpu.physical, gpu.get_instance, gpu.instance, gpu.queue, gpu.family)
+        when pointer_is_null(gpu.resources as *u8) { return gpu }
+        cube_bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.cube_vertex, gpu.cube_fragment, 1, 1, 1, 128, gpu.resources.set_layout)
         gpu.cube_layout = cube_bundle.layout
         gpu.cube_pipeline = cube_bundle.pipeline
         when pointer_is_null(gpu.cube_pipeline) || pointer_is_null(gpu.cube_layout) { return gpu }
@@ -1843,6 +1924,7 @@ extend Gpu {
     }
 
     // Width of the drawable area in pixels.
+    pub fun is_ready(self) -> bool => self.ready()
     pub fun width(self) -> u32 => self.width
     // Height of the drawable area in pixels.
     pub fun height(self) -> u32 => self.height
@@ -1956,6 +2038,7 @@ extend Gpu {
         when started != 0 { end_pass_fn = self.end_pass }
         return Frame {
             command: self.command,
+            resources: self.resources,
             queue: self.queue,
             swapchain: self.swapchain,
             image_available: self.image_available,
@@ -2034,20 +2117,58 @@ extend Frame {
         )
     }
 
-    // Draws one cube. center is the middle, size is the full width on each axis, and yaw spins it around Y.
-    pub fun draw_cube(self, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32) {
-        when pointer_is_null(self.command) || pointer_is_null(self.cube_pipeline) || pointer_is_null(self.cube_layout) { return }
-        when pointer_is_null(self.push_constants) || pointer_is_null(self.draw_cmd) || pointer_is_null(self.bind_pipeline) { return }
-        when self.width == 0 || self.height == 0 || size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 { return }
-        aspect := (self.width as f32) / (self.height as f32)
+    fun draw_geometry(self, source: *assets::MeshData, image_source: *texture::TextureData, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32, material: assets::Material) -> bool {
+        when pointer_is_null(self.command) || pointer_is_null(self.resources as *u8) || pointer_is_null(self.cube_pipeline) { return false }
+        when self.width == 0 || self.height == 0 || size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 { return false }
+        geometry := mesh_backend::mesh(self.resources, source)
+        image := mesh_backend::image(self.resources, image_source)
+        when pointer_is_null(geometry as *u8) || pointer_is_null(image as *u8) { return false }
         model := math::Mat4::translation(center.x, center.y, center.z).mul(math::Mat4::rotation_y(yaw).mul(math::Mat4::scale(size.x, size.y, size.z)))
-        view := math::Mat4::look_at(camera.eye, camera.target, camera.up)
-        mut push := math::Mat4::perspective(camera.fov_degrees, aspect, 0.1, 100.0).mul(view.mul(model))
-        cube_bind: VkBindPipelineFn = self.bind_pipeline as VkBindPipelineFn
-        cube_bind(self.command, 0, self.cube_pipeline)
+        context := self.resources
+        mut push := MeshPush {
+            mvp: camera.view_projection_for(self.width, self.height).mul(model), yaw: yaw, sx: size.x, sy: size.y, sz: size.z,
+            sun_x: context.sun_x, sun_y: context.sun_y, sun_z: context.sun_z, sun_intensity: context.sun_intensity,
+            ambient_r: context.ambient_r, ambient_g: context.ambient_g, ambient_b: context.ambient_b, ambient_intensity: context.ambient_intensity,
+            base_color: packed_color(material.base_color), sun_color: context.sun_color, pad0: 0, pad1: 0,
+        }
+        bind: VkBindPipelineFn = self.bind_pipeline as VkBindPipelineFn
+        bind(self.command, 0, self.cube_pipeline)
+        mut vertex := geometry.vertices mut offset: u64 = 0 mut set := image.set
+        bind_vertex: MeshBindVertexFn = mesh_backend::proc(context, "vkCmdBindVertexBuffers") as MeshBindVertexFn
+        bind_index: MeshBindIndexFn = mesh_backend::proc(context, "vkCmdBindIndexBuffer") as MeshBindIndexFn
+        bind_sets: MeshBindSetsFn = mesh_backend::proc(context, "vkCmdBindDescriptorSets") as MeshBindSetsFn
+        draw: MeshDrawIndexedFn = mesh_backend::proc(context, "vkCmdDrawIndexed") as MeshDrawIndexedFn
+        bind_vertex(self.command, 0, 1, &raw mut vertex, &raw mut offset)
+        bind_index(self.command, geometry.indices, 0, 1)
+        bind_sets(self.command, 0, self.cube_layout, 0, 1, &raw mut set, 0, 0 as *u8)
         push_cmd: VkPushCmdFn = self.push_constants as VkPushCmdFn
-        push_cmd(self.command, self.cube_layout, 17, 0, 64, (&raw push) as *u8)
-        draw: VkDrawFn = self.draw_cmd as VkDrawFn
-        draw(self.command, 36, 1, 0, 0)
+        push_cmd(self.command, self.cube_layout, 17, 0, 128, (&raw push) as *u8)
+        draw(self.command, source.index_count, 1, 0, 0, 0)
+        return true
+    }
+    pub fun draw_mesh(self, mesh: &assets::Mesh, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32, material: assets::Material) -> bool {
+        when pointer_is_null(self.resources as *u8) { return false }
+        return self.draw_geometry(assets::mesh_data(mesh), self.resources.white, camera, center, size, yaw, material)
+    }
+    pub fun draw_mesh_textured(self, mesh: &assets::Mesh, image: &texture::Texture, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32, material: assets::Material) -> bool {
+        return self.draw_geometry(assets::mesh_data(mesh), texture::data(image), camera, center, size, yaw, material)
+    }
+    pub fun draw_model(self, value: &model::Model, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32) -> bool {
+        return self.draw_geometry(model::geometry(value), model::image(value), camera, center, size, yaw, model::material(value))
+    }
+    pub fun draw_cube(self, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32) {
+        self.draw_cube_color(camera, center, size, yaw, math::Color::WHITE)
+    }
+    pub fun draw_cube_color(self, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32, color: math::Color) -> bool {
+        when pointer_is_null(self.resources as *u8) { return false }
+        return self.draw_geometry(self.resources.cube, self.resources.white, camera, center, size, yaw, assets::Material::new(color))
+    }
+    pub fun draw_plane(self, camera: three_d::Camera, center: math::Vec3, size: math::Vec2, color: math::Color) -> bool {
+        when pointer_is_null(self.resources as *u8) { return false }
+        return self.draw_geometry(self.resources.plane, self.resources.white, camera, center, math::Vec3::new(size.x, 1.0, size.y), 0.0, assets::Material::new(color))
+    }
+    pub fun draw_sphere(self, camera: three_d::Camera, center: math::Vec3, radius: f32, color: math::Color) -> bool {
+        when pointer_is_null(self.resources as *u8) { return false }
+        return self.draw_geometry(self.resources.sphere, self.resources.white, camera, center, math::Vec3::new(radius, radius, radius), 0.0, assets::Material::new(color))
     }
 }

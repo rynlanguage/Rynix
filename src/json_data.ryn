@@ -1,0 +1,125 @@
+// Small bounded JSON reader for glTF metadata. Nodes retain offsets into the input bytes.
+use rynix::file_data
+pub struct JsonNode { pub parent: u32, pub kind: u32, pub start: u64, pub end: u64 }
+pub struct JsonData { pub bytes: *u8, pub length: u64, pub nodes: Vec<JsonNode>, pub valid: bool }
+pub fun parse(bytes: *u8, length: u64) -> JsonData {
+    mut nodes: Vec<JsonNode> = Vec<JsonNode>()
+    mut stack: Vec<u32> = Vec<u32>()
+    mut parent: u32 = 4294967295 mut i: u64 = 0 mut valid := true
+    while i < length && valid {
+        b := file_data::byte(bytes, i)
+        when b == 32 || b == 9 || b == 10 || b == 13 || b == 44 || b == 58 { i += 1 continue }
+        when b == 125 || b == 93 {
+            when stack.len() == 0 { valid = false break }
+            node := nodes[parent as u64]
+            when (b == 125 && node.kind != 1) || (b == 93 && node.kind != 2) { valid = false break }
+            parent = stack.pop().unwrap()
+            i += 1 continue
+        }
+        when nodes.len() >= 65536 { valid = false break }
+        mut kind: u32 = 4 mut end := i + 1 mut start := i
+        when b == 123 || b == 91 {
+            when stack.len() >= 64 { valid = false break }
+            when b == 123 { kind = 1 } else { kind = 2 }
+            nodes.push(JsonNode { parent: parent, kind: kind, start: i, end: end })
+            stack.push(parent) parent = (nodes.len() - 1) as u32 i += 1 continue
+        }
+        when b == 34 {
+            kind = 3 start = i + 1 end = start
+            while end < length && file_data::byte(bytes, end) != 34 {
+                when file_data::byte(bytes, end) == 92 { end += 1 }
+                end += 1
+            }
+            when end >= length { valid = false break }
+            i = end + 1
+        } else {
+            while end < length {
+                next := file_data::byte(bytes, end)
+                when next == 32 || next == 9 || next == 10 || next == 13 || next == 44 || next == 93 || next == 125 { break }
+                end += 1
+            }
+            when b == 116 { kind = 5 } else when b == 102 { kind = 6 } else when b == 110 { kind = 7 }
+            else when (b < 48 || b > 57) && b != 45 { valid = false break }
+            i = end
+        }
+        nodes.push(JsonNode { parent: parent, kind: kind, start: start, end: end })
+    }
+    when stack.len() != 0 || nodes.len() == 0 { valid = false }
+    return JsonData { bytes: bytes, length: length, nodes: nodes, valid: valid }
+}
+extend JsonData {
+    pub fun equal(self, index: u32, expected: str) -> bool {
+        when (index as u64) >= self.nodes.len() { return false }
+        node := self.nodes[index as u64] text := String(expected)
+        when node.end - node.start != text.len() { return false }
+        mut i: u64 = 0
+        while i < text.len() { when file_data::byte(self.bytes, node.start + i) != text.byte_at(i) { return false } i += 1 }
+        return true
+    }
+    pub fun member(self, parent: u32, name: str) -> u32 {
+        when (parent as u64) >= self.nodes.len() || self.nodes[parent as u64].kind != 1 { return 4294967295 }
+        mut key := true mut matched := false mut i := (parent as u64) + 1
+        while i < self.nodes.len() {
+            node := self.nodes[i]
+            when node.parent == parent {
+                when key { matched = node.kind == 3 && self.equal(i as u32, name) }
+                else when matched { return i as u32 }
+                key = !key
+            }
+            i += 1
+        }
+        return 4294967295
+    }
+    pub fun item(self, parent: u32, index: u32) -> u32 {
+        when (parent as u64) >= self.nodes.len() || self.nodes[parent as u64].kind != 2 { return 4294967295 }
+        mut count: u32 = 0 mut i := (parent as u64) + 1
+        while i < self.nodes.len() { when self.nodes[i].parent == parent { when count == index { return i as u32 } count += 1 } i += 1 }
+        return 4294967295
+    }
+    pub fun number(self, index: u32, fallback: f64) -> f64 {
+        when (index as u64) >= self.nodes.len() { return fallback }
+        node := self.nodes[index as u64] when node.kind != 4 { return fallback }
+        mut i := node.start mut sign: f64 = 1.0 mut value: f64 = 0.0 mut fraction := false mut factor: f64 = 1.0
+        when file_data::byte(self.bytes, i) == 45 { sign = -1.0 i += 1 }
+        while i < node.end {
+            b := file_data::byte(self.bytes, i)
+            when b == 46 { fraction = true i += 1 continue }
+            when b == 101 || b == 69 { break }
+            when b < 48 || b > 57 { return fallback }
+            when fraction { factor *= 0.1 value += ((b - 48) as f64) * factor }
+            else { value = value * (10.0 as f64) + ((b - 48) as f64) }
+            i += 1
+        }
+        when i < node.end {
+            i += 1 mut negative := false mut exponent: u32 = 0
+            when i < node.end && file_data::byte(self.bytes, i) == 45 { negative = true i += 1 }
+            else when i < node.end && file_data::byte(self.bytes, i) == 43 { i += 1 }
+            while i < node.end { b := file_data::byte(self.bytes, i) when b < 48 || b > 57 { return fallback } exponent = exponent * 10 + ((b - 48) as u32) when exponent > 38 { return fallback } i += 1 }
+            while exponent > 0 { when negative { value *= 0.1 } else { value *= 10.0 } exponent -= 1 }
+        }
+        return value * sign
+    }
+    pub fun integer(self, index: u32, fallback: u32) -> u32 {
+        number := self.number(index, -1.0)
+        when number < 0.0 || number > 268435456.0 { return fallback }
+        value := number as u32 when (value as f64) != number { return fallback } return value
+    }
+    pub fun text(self, index: u32) -> String {
+        mut result := String("")
+        when (index as u64) >= self.nodes.len() { return result }
+        node := self.nodes[index as u64] when node.kind != 3 { return result }
+        mut i := node.start
+        while i < node.end {
+            mut b := file_data::byte(self.bytes, i) as u32 i += 1
+            when b == 92 { when i >= node.end { return String("") } b = file_data::byte(self.bytes, i) as u32 i += 1 when b != 47 && b != 92 && b != 34 { return String("") } }
+            else when b >= 192 {
+                mut extra: u32 = 1
+                when b < 224 { b &= 31 } else when b < 240 { b &= 15 extra = 2 } else { b &= 7 extra = 3 }
+                while extra > 0 { when i >= node.end { return String("") } next := file_data::byte(self.bytes, i) as u32 when (next & 192) != 128 { return String("") } b = (b << 6) | (next & 63) i += 1 extra -= 1 }
+            }
+            when b > 1114111 || (b >= 55296 && b <= 57343) { return String("") }
+            result.push(char_from_u32(b))
+        }
+        return result
+    }
+}

@@ -1,0 +1,62 @@
+// Binary I/O and UTF-8 paths. Allocation limits protect loaders from hostile lengths.
+use rynix::memory
+type FdOpenFn = extern "C" fun(*u8, u32, u32, *u8, u32, u32, *u8) -> *u8
+type FdSizeFn = extern "C" fun(*u8, *u64) -> i32
+type FdReadFn = extern "C" fun(*u8, *u8, u32, *u32, *u8) -> i32
+type FdCloseFn = extern "C" fun(*u8) -> i32
+type FdWideFn = extern "C" fun(u32, u32, *u8, i32, *u8, i32) -> i32
+#[drop(drop_bytes)]
+pub struct Bytes { pub data: *u8, pub length: u64 }
+fun drop_bytes(bytes: Bytes) { memory::release(bytes.data) }
+pub fun byte(pointer: *u8, offset: u64) -> u8 { p := ((pointer as u64) + offset) as *u8 return *p }
+pub fun put(pointer: *u8, offset: u64, value: u8) { p := ((pointer as u64) + offset) as *u8 *p = value }
+pub fun wide(path: str) -> *u8 {
+    text := String(path)
+    kernel := load_library("kernel32.dll")
+    convert: FdWideFn = load_symbol(kernel, "MultiByteToWideChar") as FdWideFn
+    narrow := memory::allocate(text.len() + 1)
+    when pointer_is_null(narrow) { unload_library(kernel) return 0 as *u8 }
+    mut i: u64 = 0
+    while i < text.len() { put(narrow, i, text.byte_at(i)) i += 1 }
+    out := memory::allocate((text.len() + 1) * 2)
+    when pointer_is_null(out) { memory::release(narrow) unload_library(kernel) return 0 as *u8 }
+    result := convert(65001, 8, narrow, text.len() as i32, out, (text.len() + 1) as i32)
+    memory::release(narrow)
+    unload_library(kernel)
+    when result == 0 { memory::release(out) return 0 as *u8 }
+    return out
+}
+pub fun read(path: str) -> Bytes {
+    mut out := Bytes { data: 0 as *u8, length: 0 }
+    kernel := load_library("kernel32.dll")
+    open: FdOpenFn = load_symbol(kernel, "CreateFileW") as FdOpenFn
+    size: FdSizeFn = load_symbol(kernel, "GetFileSizeEx") as FdSizeFn
+    read: FdReadFn = load_symbol(kernel, "ReadFile") as FdReadFn
+    close: FdCloseFn = load_symbol(kernel, "CloseHandle") as FdCloseFn
+    name := wide(path)
+    when pointer_is_null(name) { unload_library(kernel) return out }
+    handle := open(name, 2147483648, 1, 0 as *u8, 3, 128, 0 as *u8)
+    memory::release(name)
+    when (handle as u64) == 18446744073709551615 { unload_library(kernel) return out }
+    mut length: u64 = 0
+    mut count: u32 = 0
+    when size(handle, &raw mut length) != 0 && length > 0 && length <= 268435456 {
+        pointer := memory::allocate(length)
+        when !pointer_is_null(pointer) {
+            when read(handle, pointer, length as u32, &raw mut count, 0 as *u8) != 0 && (count as u64) == length { out = Bytes { data: pointer, length: length } }
+            else { memory::release(pointer) }
+        }
+    }
+    close(handle)
+    unload_library(kernel)
+    return out
+}
+pub fun relative(path: str, uri: str) -> String {
+    text := String(path)
+    mut last: u64 = 0
+    mut i: u64 = 0
+    while i < text.len() { when text.byte_at(i) == 47 || text.byte_at(i) == 92 { last = i + 1 } i += 1 }
+    mut out := text.slice(0, last)
+    out.append(uri)
+    return out
+}

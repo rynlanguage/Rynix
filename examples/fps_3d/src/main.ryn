@@ -1,0 +1,62 @@
+use rynix::graphics
+use rynix::math
+use rynix::three_d
+use rynix::window
+use rynix::time
+
+// Run from the Rynix directory: ryn run examples/fps_3d
+fun main() -> i32 {
+    mut window := window::Window::open(1280, 720, "Rynix | FPS courtyard | click to capture | Esc release / close")
+    when !window.is_open() { return 1 }
+    mut gpu := graphics::Gpu::open(window.native_handle())
+    when !gpu.is_ready() { echo "Vulkan renderer could not initialize." return 3 }
+    gpu.set_ambient_light(three_d::AmbientLight::new(math::Color::rgb(174, 200, 226), 0.35))
+    gpu.set_directional_light(three_d::DirectionalLight::new(math::Vec3::new(-0.4, -1.0, -0.3), math::Color::rgb(255, 239, 203), 1.0))
+    mut camera := three_d::FpsCamera::new(math::Vec3::new(0.0, 2.8, 11.0))
+    camera.set_angles(0.0, -9.0)
+    mut clock := time::Clock::start()
+    crate_model := graphics::Model::load("examples/fps_3d/assets/crate.glb")
+    when !crate_model.is_ready() { echo "Run this example from the Rynix directory; crate.glb must be present." return 2 }
+    // Capture starts with a deliberate click, so launching never steals the pointer.
+    while window.poll_events_for(1) {
+        dt := clock.tick()
+        when window.key_pressed(window::KeyCode::ESCAPE) {
+            when window.mouse_captured() { window.release_mouse() }
+            else { window.close() break }
+        }
+        when window.mouse_pressed(window::MouseButton::LEFT) { window.capture_mouse() }
+        camera.update(&window, dt)
+        view := camera.camera()
+        frame := gpu.begin()
+        when frame.width() == 0 { continue }
+        frame.clear(math::Color::rgb(25, 38, 54))
+        frame.draw_plane(view, math::Vec3::new(0.0, 0.0, -2.0), math::Vec2::new(24.0, 24.0), math::Color::rgb(109, 128, 122))
+        // A courtyard with a gateway, stairs, columns, and colored objects.
+        frame.draw_cube_color(view, math::Vec3::new(-6.0, 1.5, -3.0), math::Vec3::new(0.8, 3.0, 15.0), 0.0, math::Color::rgb(85, 113, 130))
+        frame.draw_cube_color(view, math::Vec3::new(6.0, 1.5, -3.0), math::Vec3::new(0.8, 3.0, 15.0), 0.0, math::Color::rgb(85, 113, 130))
+        frame.draw_cube_color(view, math::Vec3::new(0.0, 1.5, -10.0), math::Vec3::new(12.0, 3.0, 0.8), 0.0, math::Color::rgb(72, 98, 115))
+        mut i: u32 = 0
+        while i < 4 {
+            x := -4.5 + (i as f32) * (3.0 as f32)
+            frame.draw_cube_color(view, math::Vec3::new(x, 1.4, -6.0), math::Vec3::new(0.65, 2.8, 0.65), 0.0, math::Color::rgb(198, 200, 184))
+            frame.draw_sphere(view, math::Vec3::new(x, 3.1, -6.0), 0.45, math::Color::rgb(240, 193, 99))
+            height := (i + 1) as f32 * (0.3 as f32)
+            frame.draw_cube_color(view, math::Vec3::new(-3.5, height * (0.5 as f32), 2.0 - (i as f32)), math::Vec3::new(2.0, height, 1.0), 0.0, math::Color::rgb(149, 177, 171))
+            i += 1
+        }
+        frame.draw_cube_color(view, math::Vec3::new(-1.7, 0.65, -1.5), math::Vec3::new(1.3, 1.3, 1.3), 0.25, math::Color::ORANGE)
+        frame.draw_cube_color(view, math::Vec3::new(2.5, 1.0, -3.5), math::Vec3::new(1.5, 2.0, 1.5), -0.4, math::Color::SKY_BLUE)
+        frame.draw_sphere(view, math::Vec3::new(0.0, 1.0, -4.5), 1.0, math::Color::PURPLE)
+        frame.draw_model(&crate_model, view, math::Vec3::new(2.0, 0.75, 2.0), math::Vec3::new(1.5, 1.5, 1.5), -0.25)
+        frame.draw_model(&crate_model, view, math::Vec3::new(3.6, 0.55, 0.4), math::Vec3::new(1.1, 1.1, 1.1), 0.2)
+        // A ray interaction highlight changes when the camera aims at the orange crate.
+        target := three_d::Aabb::new(math::Vec3::new(-2.5, 0.0, -2.3), math::Vec3::new(-0.9, 1.3, -0.7))
+        mut crosshair := math::Color::WHITE
+        when camera.center_ray().intersect_aabb(target).is_some() { crosshair = math::Color::YELLOW }
+        cx := (frame.width() / 2) as i32 cy := (frame.height() / 2) as i32
+        frame.fill_rect(cx - 6, cy, 13, 1, crosshair)
+        frame.fill_rect(cx, cy - 6, 1, 13, crosshair)
+        frame.fill_rect(16, 16, 160, 4, math::Color::ORANGE)
+    }
+    return 0
+}

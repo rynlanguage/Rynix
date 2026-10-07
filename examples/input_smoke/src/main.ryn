@@ -1,0 +1,40 @@
+// Interactive 20-second Raw Input regression. Click, move, W, Shift+W, Space/Ctrl, F2, close X.
+use rynix::window
+use rynix::three_d
+use rynix::math
+use rynix::time
+fun main() -> i32 {
+    mut window := window::Window::open(640, 360, "Rynix input smoke | click, WASD, Shift, Space/Ctrl, F2 focus test, X")
+    mut camera := three_d::FpsCamera::new(math::Vec3::ZERO)
+    mut clock := time::Clock::start()
+    mut raw_x: i64 = 0 mut raw_y: i64 = 0 mut normal: f32 = 0.0 mut sprint: f32 = 0.0 mut up: f32 = 0.0 mut down: f32 = 0.0
+    mut focus_released := false mut recaptured := false
+    while window.poll_events_for(1) && clock.elapsed() < 20.0 {
+        dt := clock.tick()
+        when window.mouse_pressed(window::MouseButton::LEFT) {
+            captured := window.capture_mouse()
+            when captured && focus_released { recaptured = true when window.mouse_delta_x() != 0 || window.mouse_delta_y() != 0 { return 2 } }
+        }
+        raw_x += window.mouse_delta_x() as i64 raw_y += window.mouse_delta_y() as i64
+        before := camera.position() camera.update(&window, dt) distance := camera.position().sub(before).length()
+        when window.key_down(window::KeyCode::W) {
+            when window.key_down(window::KeyCode::SHIFT) { sprint += distance } else { normal += distance }
+        }
+        when window.key_down(window::KeyCode::SPACE) { up += distance }
+        when window.key_down(window::KeyCode::CONTROL) { down += distance }
+        when window.key_pressed(window::KeyCode::F2) {
+            mut other := window::Window::open(320, 180, "Rynix focus-loss target")
+            other.poll_events()
+            window.poll_events()
+            when window.mouse_captured() || window.mouse_delta_x() != 0 || window.mouse_delta_y() != 0 { return 3 }
+            focus_released = true
+            other.close()
+        }
+    }
+    window.release_mouse()
+    echo raw_x echo raw_y echo camera.yaw echo camera.pitch
+    echo normal echo sprint echo up echo down echo focus_released echo recaptured
+    when raw_x == 0 || raw_y == 0 || normal < (0.5 as f32) || sprint < (1.0 as f32) || up < (0.1 as f32) || down < (0.1 as f32) || !focus_released || !recaptured { return 1 }
+    echo "Raw Input / movement / sprint / vertical / focus / recapture checks passed"
+    return 0
+}

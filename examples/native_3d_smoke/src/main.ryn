@@ -1,0 +1,61 @@
+// Deterministic Win32/Vulkan lifecycle and input-transition regression.
+use rynix::graphics
+use rynix::window
+use rynix::math
+use rynix::three_d
+type TestPostFn = extern "C" fun(*u8, u32, u64, i64) -> i32
+type TestSendFn = extern "C" fun(*u8, u32, u64, i64) -> i64
+type TestShowFn = extern "C" fun(*u8, i32) -> i32
+type TestDestroyFn = extern "C" fun(*u8) -> i32
+fun minimized(gpu: &mut graphics::Gpu) -> bool { frame := gpu.begin() return frame.width() == 0 && frame.height() == 0 }
+fun draw(gpu: &mut graphics::Gpu, camera: three_d::Camera) -> bool {
+    frame := gpu.begin()
+    when frame.width() == 0 { return false }
+    frame.clear(math::Color::rgb(25, 38, 54))
+    loaded := graphics::Model::load("examples/fps_3d/assets/crate.glb")
+    custom := graphics::Mesh::cube()
+    png := graphics::Texture::load("examples/fps_3d/assets/checker.png")
+    material := graphics::Material::new(math::Color::WHITE)
+    a := frame.draw_plane(camera, math::Vec3::new(0.0, -1.0, 0.0), math::Vec2::new(12.0, 12.0), math::Color::GRAY)
+    b := frame.draw_sphere(camera, math::Vec3::new(-2.0, 0.0, 0.0), 1.0, math::Color::PURPLE)
+    c := frame.draw_model(&loaded, camera, math::Vec3::ZERO, math::Vec3::ONE, 0.4)
+    d := frame.draw_mesh_textured(&custom, &png, camera, math::Vec3::new(2.0, 0.0, 0.0), math::Vec3::ONE, 0.0, material)
+    return a && b && c && d
+}
+fun main() -> i32 {
+    user32 := load_library("user32.dll")
+    post: TestPostFn = load_symbol(user32, "PostMessageW") as TestPostFn
+    send: TestSendFn = load_symbol(user32, "SendMessageW") as TestSendFn
+    show: TestShowFn = load_symbol(user32, "ShowWindow") as TestShowFn
+    mut window := window::Window::open(640, 480, "Rynix native 3D lifecycle regression")
+    mut gpu := graphics::Gpu::open(window.native_handle())
+    camera := three_d::Camera::new(math::Vec3::new(3.0, 3.0, 7.0), math::Vec3::ZERO, math::Vec3::UP, 60.0)
+    when !window.poll_events() || !draw(&mut gpu, camera) { return 1 }
+    post(window.native_handle(), 256, 87, 1) window.poll_events()
+    when !window.key_pressed(window::KeyCode::W) { return 2 }
+    window.poll_events() when window.key_pressed(window::KeyCode::W) { return 3 }
+    post(window.native_handle(), 256, 87, 1073741825) window.poll_events()
+    when window.key_pressed(window::KeyCode::W) { return 4 }
+    post(window.native_handle(), 257, 87, -1073741823) window.poll_events()
+    when !window.key_released(window::KeyCode::W) { return 5 }
+    post(window.native_handle(), 256, 87, 1) post(window.native_handle(), 257, 87, -1073741823) window.poll_events()
+    when !window.key_pressed(window::KeyCode::W) || !window.key_released(window::KeyCode::W) { return 6 }
+    when !window.set_size(900, 600) { return 7 }
+    window.poll_events() when !draw(&mut gpu, camera) || gpu.width() != 900 || gpu.height() != 600 { return 8 }
+    show(window.native_handle(), 6) window.poll_events()
+    when !minimized(&mut gpu) { return 9 }
+    show(window.native_handle(), 9) window.poll_events()
+    when !draw(&mut gpu, camera) { return 10 }
+    // Closing one HWND must not put WM_QUIT into a thread with another live window.
+    mut other := window::Window::open(320, 240, "Rynix independent second window")
+    send(window.native_handle(), 16, 0, 0)
+    when window.is_open() || window.poll_events() || window.poll_events_for(1) { return 11 }
+    window.close() window.close()
+    when !other.poll_events() || !other.is_open() { return 12 }
+    real_destroy: TestDestroyFn = load_symbol(user32, "DestroyWindow") as TestDestroyFn
+    real_destroy(other.native_handle())
+    when other.is_open() || other.poll_events_for(1) { return 13 }
+    unload_library(user32)
+    echo "native input / resources / resize / minimize / restore / close checks passed"
+    return 0
+}
