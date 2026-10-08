@@ -1,0 +1,21 @@
+// Opens the default wave output, plays two short tones back to back, and waits for each to finish.
+// Exit code 0 means the device opened, both sounds were accepted, and both finished playing.
+use rynix::audio
+
+fun main() -> i32 {
+    mut output := audio::Output::open()
+    when !output.is_ready() {
+        echo "No wave output device is available."
+        return 1
+    }
+    low := audio::Sound::tone(330.0, 0.15, 0.4)
+    high := audio::Sound::tone(880.0, 0.15, 0.4)
+    when !output.play(&low) { return 2 }
+    when !output.is_playing() { return 3 }
+    output.wait()
+    when output.is_playing() { return 4 }
+    when !output.play(&high) { return 5 }
+    output.wait()
+    when output.is_playing() { return 6 }
+    return 0
+}

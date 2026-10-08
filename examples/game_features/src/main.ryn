@@ -1,0 +1,113 @@
+use rynix::audio
+use rynix::graphics
+use rynix::math
+use rynix::physics
+use rynix::procgen
+use rynix::three_d
+use rynix::time
+use rynix::window
+
+// Run from the Rynix directory: ryn run examples/game_features
+// A procedural heightfield made of collision columns, a character with gravity and jumping,
+// a jump tone, and bitmap text. Esc releases the mouse, then closes the window.
+fun main() -> i32 {
+    mut window := window::Window::open(1280, 720, "Rynix | procedural columns | click to capture | Esc release / close")
+    when !window.is_open() { return 1 }
+    mut gpu := graphics::Gpu::open(window.native_handle())
+    when !gpu.is_ready() { echo "Vulkan renderer could not initialize." return 3 }
+    gpu.set_ambient_light(three_d::AmbientLight::new(math::Color::rgb(174, 200, 226), 0.35))
+    gpu.set_directional_light(three_d::DirectionalLight::new(math::Vec3::new(-0.4, -1.0, -0.3), math::Color::rgb(255, 239, 203), 1.0))
+
+    mut sound := audio::Output::open()
+    jump_tone := audio::Sound::tone(660.0, 0.12, 0.3)
+
+    // One collision column per 1x1 cell, from below the floor up to a procedural height.
+    terrain := procgen::Terrain::new(77, 9.0, 3.0)
+    mut solids := Vec<three_d::Aabb>()
+    mut gx: i32 = 0
+    while gx < 20 {
+        mut gz: i32 = 0
+        while gz < 20 {
+            x0 := (gx - 10) as f32
+            z0 := (gz - 10) as f32
+            top := terrain.height_at(x0 + 0.5, z0 + 0.5)
+            solids.push(three_d::Aabb::new(math::Vec3::new(x0, -1.0, z0), math::Vec3::new(x0 + 1.0, top, z0 + 1.0)))
+            gz += 1
+        }
+        gx += 1
+    }
+
+    // Distant columns fade into the sky colour; a warm light follows the character.
+    gpu.set_fog(three_d::Fog::linear(math::Color::rgb(25, 38, 54), 14.0, 34.0))
+
+    spawn := math::Vec3::new(0.5, 6.0, 0.5)
+    mut body := physics::CharacterController::new(spawn, math::Vec3::new(0.6, 1.8, 0.6))
+    mut camera := three_d::FpsCamera::new(spawn)
+    camera.set_angles(0.0, -15.0)
+    mut clock := time::Clock::start()
+
+    while window.poll_events_for(1) {
+        dt := clock.tick()
+        when window.key_pressed(window::KeyCode::ESCAPE) {
+            when window.mouse_captured() { window.release_mouse() }
+            else { window.close() break }
+        }
+        when window.mouse_pressed(window::MouseButton::LEFT) { window.capture_mouse() }
+        when window.mouse_captured() { camera.look_by(window.mouse_delta_x() as f32, window.mouse_delta_y() as f32) }
+
+        // Movement follows the horizontal part of the view direction.
+        look := camera.forward()
+        forward := math::Vec3::new(look.x, 0.0, look.z).normalized()
+        // Same as FpsCamera::right: forward crossed with UP.
+        right := math::Vec3::new(0.0 - forward.z, 0.0, forward.x)
+        mut move_x: f32 = 0.0
+        mut move_z: f32 = 0.0
+        when window.key_down(window::KeyCode::W) { move_x += forward.x move_z += forward.z }
+        when window.key_down(window::KeyCode::S) { move_x -= forward.x move_z -= forward.z }
+        when window.key_down(window::KeyCode::D) { move_x += right.x move_z += right.z }
+        when window.key_down(window::KeyCode::A) { move_x -= right.x move_z -= right.z }
+        mut speed: f32 = 4.5
+        when window.key_down(window::KeyCode::SHIFT) { speed = 9.0 }
+        mut velocity := body.velocity
+        velocity.x = move_x * speed
+        velocity.z = move_z * speed
+        body.velocity = velocity
+        when window.key_pressed(window::KeyCode::SPACE) {
+            when body.jump() { sound.play(&jump_tone) }
+        }
+        body.step(solids.as_slice(), dt)
+        // Falling off the edge returns the character to the spawn point.
+        when body.position.y < -20.0 { body = physics::CharacterController::new(spawn, math::Vec3::new(0.6, 1.8, 0.6)) }
+        camera.set_position(math::Vec3::new(body.position.x, body.position.y + 1.6, body.position.z))
+
+        view := camera.camera()
+        gpu.set_point_light(three_d::PointLight::new(math::Vec3::new(body.position.x, body.position.y + 1.5, body.position.z), math::Color::rgb(255, 190, 110), 0.8, 5.0))
+        frame := gpu.begin()
+        when frame.width() == 0 { continue }
+        frame.clear(math::Color::rgb(25, 38, 54))
+        mut i: u64 = 0
+        while i < solids.len() {
+            column := solids[i]
+            i += 1
+            center := math::Vec3::new((column.min.x + column.max.x) * 0.5, (column.min.y + column.max.y) * 0.5, (column.min.z + column.max.z) * 0.5)
+            size := math::Vec3::new(column.max.x - column.min.x, column.max.y - column.min.y, column.max.z - column.min.z)
+            shade := (110.0 + column.max.y * 30.0) as u8
+            frame.draw_cube_color(view, center, size, 0.0, math::Color::rgb(shade, 150, 120))
+        }
+        body_size := body.size
+        frame.draw_cube_color(view, math::Vec3::new(body.position.x, body.position.y + body_size.y * 0.5, body.position.z), body_size, 0.0, math::Color::ORANGE)
+
+        // HUD text is drawn last so it stays on top of the 3D scene.
+        frame.draw_text(16, 16, "WASD MOVE  SHIFT RUN  SPACE JUMP", 3, math::Color::WHITE)
+        when body.grounded {
+            frame.draw_text(16, 56, "GROUNDED", 3, math::Color::rgb(140, 230, 140))
+        } else {
+            frame.draw_text(16, 56, "AIRBORNE", 3, math::Color::rgb(240, 200, 120))
+        }
+        cx := (frame.width() / 2) as i32
+        cy := (frame.height() / 2) as i32
+        frame.fill_rect(cx - 6, cy, 13, 1, math::Color::WHITE)
+        frame.fill_rect(cx, cy - 6, 1, 13, math::Color::WHITE)
+    }
+    return 0
+}

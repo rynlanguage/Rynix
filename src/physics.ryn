@@ -1,0 +1,117 @@
+// Gravity and axis-aligned collision for a character box. Pure CPU code; no Vulkan.
+// Solids are three_d::Aabb boxes. Touching a surface does not count as overlap.
+use rynix::math
+use rynix::three_d
+
+pub struct CharacterController {
+    // Bottom-centre of the box. Y grows upward, like the rest of Rynix.
+    pub position: math::Vec3,
+    // Full box extent: X and Z are the width/depth, Y is the height.
+    pub size: math::Vec3,
+    pub velocity: math::Vec3,
+    // Downward acceleration in units per second squared.
+    pub gravity: f32,
+    pub jump_speed: f32,
+    // True when the last step ended resting on a solid.
+    pub grounded: bool,
+}
+
+extend CharacterController {
+    pub fun new(position: math::Vec3, size: math::Vec3) -> CharacterController {
+        return CharacterController { position: position, size: size, velocity: math::Vec3::ZERO, gravity: 20.0, jump_speed: 7.0, grounded: false }
+    }
+
+    pub fun bounds(self) -> three_d::Aabb {
+        half_x: f32 = self.size.x * 0.5
+        half_z: f32 = self.size.z * 0.5
+        low := math::Vec3::new(self.position.x - half_x, self.position.y, self.position.z - half_z)
+        high := math::Vec3::new(self.position.x + half_x, self.position.y + self.size.y, self.position.z + half_z)
+        return three_d::Aabb::new(low, high)
+    }
+
+    // Starts a jump only when standing on something. Returns whether it started.
+    pub fun jump(mut self) -> bool {
+        when !self.grounded { return false }
+        mut velocity := self.velocity
+        velocity.y = self.jump_speed
+        self.velocity = velocity
+        self.grounded = false
+        return true
+    }
+
+    // Applies gravity, then moves by velocity * dt. The move is split into pieces of at most
+    // 0.1 units so a fast body cannot skip a thin solid. Each axis is resolved on its own.
+    pub fun step(mut self, solids: &[three_d::Aabb], dt: f32) {
+        when dt <= 0.0 { return }
+        mut velocity := self.velocity
+        velocity.y -= self.gravity * dt
+        self.velocity = velocity
+        delta := velocity.mul(dt)
+        longest := largest_abs(delta)
+        mut pieces: i32 = 1
+        when longest > 0.1 { pieces = (longest / 0.1) as i32 + 1 }
+        part := delta.mul(1.0 / (pieces as f32))
+        mut i: i32 = 0
+        while i < pieces {
+            self.move_axis(solids, 0, part.x)
+            self.move_axis(solids, 2, part.z)
+            self.move_axis(solids, 1, part.y)
+            i += 1
+        }
+    }
+
+    // Moves the box on one axis (0 = X, 1 = Y, 2 = Z), then pushes it out of every solid it overlaps.
+    fun move_axis(mut self, solids: &[three_d::Aabb], axis: i32, amount: f32) {
+        when amount == 0.0 { return }
+        mut position := self.position
+        when axis == 0 { position.x += amount }
+        when axis == 1 { position.y += amount }
+        when axis == 2 { position.z += amount }
+        self.position = position
+        when axis == 1 { self.grounded = false }
+        mut i: u64 = 0
+        while i < solids.len() {
+            solid := solids[i]
+            i += 1
+            when overlaps(self.bounds(), solid) { self.resolve(solid, axis, amount) }
+        }
+    }
+
+    fun resolve(mut self, solid: three_d::Aabb, axis: i32, amount: f32) {
+        mut position := self.position
+        mut velocity := self.velocity
+        when axis == 0 {
+            when amount > 0.0 { position.x = solid.min.x - self.size.x * 0.5 }
+            when amount < 0.0 { position.x = solid.max.x + self.size.x * 0.5 }
+            velocity.x = 0.0
+        }
+        when axis == 2 {
+            when amount > 0.0 { position.z = solid.min.z - self.size.z * 0.5 }
+            when amount < 0.0 { position.z = solid.max.z + self.size.z * 0.5 }
+            velocity.z = 0.0
+        }
+        when axis == 1 {
+            // Falling onto a top surface lands the body; a rising body is stopped by a ceiling.
+            when amount < 0.0 {
+                position.y = solid.max.y
+                self.grounded = true
+            }
+            when amount > 0.0 { position.y = solid.min.y - self.size.y }
+            velocity.y = 0.0
+        }
+        self.position = position
+        self.velocity = velocity
+    }
+}
+
+// Strict overlap: boxes that only share a face are not overlapping.
+fun overlaps(a: three_d::Aabb, b: three_d::Aabb) -> bool {
+    return a.min.x < b.max.x && a.max.x > b.min.x && a.min.y < b.max.y && a.max.y > b.min.y && a.min.z < b.max.z && a.max.z > b.min.z
+}
+
+fun largest_abs(value: math::Vec3) -> f32 {
+    x := math::scalar_max(value.x, 0.0 - value.x)
+    y := math::scalar_max(value.y, 0.0 - value.y)
+    z := math::scalar_max(value.z, 0.0 - value.z)
+    return math::scalar_max(x, math::scalar_max(y, z))
+}

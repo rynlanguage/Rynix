@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1 - 2026-10-08
+
+- `physics`: `CharacterController` with gravity, jumping, grounded state, and
+  axis-aligned collision against `three_d::Aabb` solids, with sub-stepping.
+- `procgen`: seeded `Random`, integer-hash value noise, `fractal_noise`, and a
+  `Terrain` height helper. Output is deterministic per seed.
+- `text`: built-in 5x7 ASCII bitmap font, `text::width`, and `Frame::draw_text`
+  drawn as filled rectangles.
+- `audio`: winmm waveOut output with `Sound::tone`, `Sound::silence`, `Output`
+  with `play`, `stop`, `is_playing`, and `wait`. The old placeholder is gone.
+- `three_d::Fog` and `three_d::PointLight`, set with `Gpu::set_fog` and
+  `Gpu::set_point_light`, evaluated per pixel in the mesh fragment shader.
+- Mesh shaders are now built in Ryn: `spirv` is a small SPIR-V writer and `shaders`
+  describes the vertex and fragment stages. The generated GLSL words,
+  `mesh_vertex`/`mesh_fragment`, and the `tools/shaders` naga generator are removed. The mesh push block grew to 224 bytes;
+  `Gpu::open` needs `maxPushConstantsSize` of at least 224.
+- Examples: `physics_check`, `features_check`, `audio_smoke` (run by the test
+  script), and `game_features` (interactive demo, not run unattended).
+
 ## 0.3.0
 
 - WM_CLOSE/WM_DESTROY update native window state immediately; explicit close,

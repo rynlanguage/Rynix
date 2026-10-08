@@ -1,0 +1,61 @@
+// GPU-free regression for gravity, jumping, and axis-aligned collision. Exit code 0 means pass.
+use rynix::math
+use rynix::three_d
+use rynix::physics
+
+fun close(a: f32, b: f32) -> bool => a - b < (0.0001 as f32) && b - a < (0.0001 as f32)
+
+fun run(start: physics::CharacterController, solids: &[three_d::Aabb], dt: f32, steps: i32) -> physics::CharacterController {
+    mut body := start
+    mut i: i32 = 0
+    while i < steps {
+        body.step(solids, dt)
+        i += 1
+    }
+    return body
+}
+
+fun main() -> i32 {
+    mut solids := Vec<three_d::Aabb>()
+    // Floor top at y = 0.
+    solids.push(three_d::Aabb::new(math::Vec3::new(-10.0, -1.0, -10.0), math::Vec3::new(10.0, 0.0, 10.0)))
+    // Wall from x = 2 to x = 2.5, thin enough that a fast body would skip it without sub-stepping.
+    solids.push(three_d::Aabb::new(math::Vec3::new(2.0, 0.0, -10.0), math::Vec3::new(2.5, 5.0, 10.0)))
+    // Ceiling bottom at y = 3.
+    solids.push(three_d::Aabb::new(math::Vec3::new(-10.0, 3.0, -10.0), math::Vec3::new(10.0, 4.0, 10.0)))
+    // Falls from above and lands on the floor.
+    mut falling := physics::CharacterController::new(math::Vec3::new(-5.0, 1.0, 0.0), math::Vec3::new(0.6, 1.8, 0.6))
+    falling = run(falling, solids.as_slice(), 1.0 / 60.0, 180)
+    when !falling.grounded || !close(falling.position.y, 0.0) || !close(falling.velocity.y, 0.0) { return 1 }
+    // Resting body stays put frame after frame.
+    rested := run(falling, solids.as_slice(), 1.0 / 60.0, 60)
+    when !rested.grounded || !close(rested.position.y, 0.0) { return 2 }
+    // Jump lifts the body and clears grounded until it lands again.
+    mut jumper := rested
+    when !jumper.jump() || jumper.grounded { return 3 }
+    jumper.step(solids.as_slice(), 1.0 / 60.0)
+    when jumper.position.y <= 0.0 || jumper.grounded { return 4 }
+    when jumper.jump() { return 5 }
+    // Walking into the wall stops at its face: 2.0 - half width 0.3.
+    mut walker := rested
+    walker.position = math::Vec3::new(0.0, 0.0, 0.0)
+    walker.velocity = math::Vec3::new(200.0, 0.0, 0.0)
+    walker = run(walker, solids.as_slice(), 1.0 / 60.0, 1)
+    when !close(walker.position.x, 1.7) || !close(walker.velocity.x, 0.0) { return 6 }
+    // Jumping under the ceiling stops at its underside: 3.0 - height 1.8.
+    mut under := rested
+    under.position = math::Vec3::new(0.0, 0.0, 0.0)
+    under.velocity = math::Vec3::new(0.0, 200.0, 0.0)
+    under = run(under, solids.as_slice(), 1.0 / 60.0, 1)
+    when !close(under.position.y, 1.2) || under.velocity.y > 0.0 { return 7 }
+    // Zero or negative time does nothing.
+    frozen := rested
+    after := run(frozen, solids.as_slice(), 0.0, 10)
+    when !close(after.position.y, rested.position.y) { return 8 }
+    // Empty world: gravity only, never grounded.
+    none := Vec<three_d::Aabb>()
+    mut air := physics::CharacterController::new(math::Vec3::new(0.0, 10.0, 0.0), math::Vec3::ONE)
+    air.step(none.as_slice(), 0.1)
+    when air.grounded || air.position.y >= 10.0 { return 9 }
+    return 0
+}

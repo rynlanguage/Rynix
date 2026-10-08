@@ -8,12 +8,12 @@ try {
         & $Compiler build $example.FullName --release
         if ($LASTEXITCODE -ne 0) { throw "build failed: $($example.Name)" }
     }
-    foreach ($example in @('quick_start','math_check','camera_check','cpu_3d')) {
+    foreach ($example in @('quick_start','math_check','camera_check','cpu_3d','physics_check','features_check')) {
         & $Compiler run "examples/$example" --release
         if ($LASTEXITCODE -ne 0) { throw "CPU regression failed: $example" }
     }
     if ($Native) {
-        foreach ($example in @('window_smoke','graphics_smoke','native_3d_smoke')) {
+        foreach ($example in @('window_smoke','graphics_smoke','native_3d_smoke','audio_smoke')) {
             & $Compiler run "examples/$example" --release
             if ($LASTEXITCODE -ne 0) { throw "native regression failed: $example" }
         }

@@ -1,6 +1,0 @@
-[package]
-name = "rynix-shaders"
-version = "0.1.0"
-edition = "2021"
-[dependencies]
-naga = { version = "22.1.0", features = ["glsl-in", "spv-out"] }

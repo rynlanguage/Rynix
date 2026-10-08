@@ -1,0 +1,527 @@
+// A small SPIR-V writer for Rynix's built-in shaders. Shader modules are built by calling these
+// functions from Ryn, so no external compiler or generated words are needed. Only the instructions
+// the mesh shaders use are provided.
+//
+// Instructions are written into four streams that are joined in SPIR-V's required order:
+// the head (capabilities, extended imports, memory model, entry point, execution mode),
+// decorations, types and module-scope variables, then function bodies.
+use rynix::memory
+
+// A fixed-capacity buffer of 32-bit words. Pointers keep Builder cheap to copy into helpers.
+#[repr(C)]
+pub struct Stream { data: *u8, count: u64, capacity: u64 }
+
+pub struct Builder { head: *Stream, decor: *Stream, types: *Stream, code: *Stream, ids: *Stream, iface: *Stream }
+
+// A finished module in heap memory. Free its data with release_module.
+pub struct Module { pub data: *u8, pub bytes: u64 }
+
+fun stream_new(words: u64) -> *Stream {
+    s := memory::allocate(sizeof(Stream)) as *Stream
+    *s = Stream { data: memory::allocate(words * 4), count: 0, capacity: words }
+    return s
+}
+
+fun stream_free(s: *Stream) {
+    current := *s
+    memory::release(current.data)
+    memory::release(s as *u8)
+}
+
+fun put(s: *Stream, word: u32) {
+    current := *s
+    when current.count >= current.capacity { return }
+    target := (current.data as u64 + current.count * 4) as *u32
+    *target = word
+    *s = Stream { data: current.data, count: current.count + 1, capacity: current.capacity }
+}
+
+fun read_word(s: Stream, index: u64) -> u32 {
+    source := (s.data as u64 + index * 4) as *u32
+    return *source
+}
+
+// Starts an instruction whose total length, header word included, is `length` words.
+fun begin(s: *Stream, opcode: u32, length: u32) {
+    put(s, (length << (16 as u32)) | opcode)
+}
+
+// Strings are NUL-terminated and padded to whole words: floor(bytes / 4) + 1 words.
+fun name_words(text: str) -> u32 => (String(text).len() as u32) / 4 + 1
+
+fun write_name(s: *Stream, text: str) {
+    mut word: u32 = 0
+    mut fill: u32 = 0
+    for ch in text {
+        word = word | ((ch as u32) << (fill * (8 as u32)))
+        fill += 1
+        when fill == 4 {
+            put(s, word)
+            word = 0
+            fill = 0
+        }
+    }
+    put(s, word)
+}
+
+// Bit pattern of an f32, for OpConstant.
+pub fun float_bits(value: f32) -> u32 {
+    mut x := value
+    p := (&raw mut x) as *u32
+    return *p
+}
+
+pub fun builder() -> Builder {
+    ids := memory::allocate(sizeof(Stream)) as *Stream
+    *ids = Stream { data: 0 as *u8, count: 1, capacity: 0 }
+    return Builder {
+        head: stream_new(256),
+        decor: stream_new(2048),
+        types: stream_new(8192),
+        code: stream_new(16384),
+        ids: ids,
+        iface: stream_new(64),
+    }
+}
+
+// Frees the builder's streams. Call it after finish, whether or not the module was used.
+pub fun release_builder(b: Builder) {
+    stream_free(b.head)
+    stream_free(b.decor)
+    stream_free(b.types)
+    stream_free(b.code)
+    stream_free(b.iface)
+    memory::release(b.ids as *u8)
+}
+
+pub fun new_id(b: Builder) -> u32 {
+    counter := b.ids
+    current := *counter
+    *counter = Stream { data: current.data, count: current.count + 1, capacity: current.capacity }
+    return current.count as u32
+}
+
+pub fun release_module(module: Module) {
+    memory::release(module.data)
+}
+
+// Module-level setup, written to the head.
+pub fun capability(b: Builder, value: u32) {
+    begin(b.head, 17, 2)
+    put(b.head, value)
+}
+
+// Imports an extended instruction set; returns its id for ext1/ext2/ext3.
+pub fun ext_import(b: Builder, name: str) -> u32 {
+    id := new_id(b)
+    begin(b.head, 11, 2 + name_words(name))
+    put(b.head, id)
+    write_name(b.head, name)
+    return id
+}
+
+// Logical addressing with the GLSL.450 memory model.
+pub fun memory_model(b: Builder) {
+    begin(b.head, 14, 3)
+    put(b.head, 0)
+    put(b.head, 1)
+}
+
+// Decorations ---------------------------------------------------------------------------------
+
+pub fun decorate(b: Builder, target: u32, decoration: u32, value: u32) {
+    begin(b.decor, 71, 4)
+    put(b.decor, target)
+    put(b.decor, decoration)
+    put(b.decor, value)
+}
+
+pub fun decorate_block(b: Builder, target: u32) {
+    begin(b.decor, 71, 3)
+    put(b.decor, target)
+    put(b.decor, 2)
+}
+
+pub fun decorate_member(b: Builder, target: u32, member: u32, decoration: u32, value: u32) {
+    begin(b.decor, 72, 5)
+    put(b.decor, target)
+    put(b.decor, member)
+    put(b.decor, decoration)
+    put(b.decor, value)
+}
+
+// For decorations with no literal operand, such as RowMajor and ColMajor.
+pub fun decorate_member_flag(b: Builder, target: u32, member: u32, decoration: u32) {
+    begin(b.decor, 72, 4)
+    put(b.decor, target)
+    put(b.decor, member)
+    put(b.decor, decoration)
+}
+
+// Types and constants (written to the types stream, in creation order) ------------------------
+
+pub fun void_type(b: Builder) -> u32 {
+    id := new_id(b)
+    begin(b.types, 19, 2)
+    put(b.types, id)
+    return id
+}
+
+pub fun float_type(b: Builder) -> u32 {
+    id := new_id(b)
+    begin(b.types, 22, 3)
+    put(b.types, id)
+    put(b.types, 32)
+    return id
+}
+
+pub fun int_type(b: Builder, signed: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 21, 4)
+    put(b.types, id)
+    put(b.types, 32)
+    put(b.types, signed)
+    return id
+}
+
+pub fun vector_type(b: Builder, component: u32, count: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 23, 4)
+    put(b.types, id)
+    put(b.types, component)
+    put(b.types, count)
+    return id
+}
+
+pub fun matrix_type(b: Builder, column: u32, count: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 24, 4)
+    put(b.types, id)
+    put(b.types, column)
+    put(b.types, count)
+    return id
+}
+
+// Storage classes: UniformConstant 0, Input 1, Uniform 2, Output 3, Function 7, PushConstant 9.
+pub fun pointer_type(b: Builder, storage: u32, pointee: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 32, 4)
+    put(b.types, id)
+    put(b.types, storage)
+    put(b.types, pointee)
+    return id
+}
+
+pub fun function_type(b: Builder, result: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 33, 3)
+    put(b.types, id)
+    put(b.types, result)
+    return id
+}
+
+// 2D float texture, sampled, unknown format.
+pub fun image_type(b: Builder, sampled: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 25, 9)
+    put(b.types, id)
+    put(b.types, sampled)
+    put(b.types, 1)
+    put(b.types, 0)
+    put(b.types, 0)
+    put(b.types, 0)
+    put(b.types, 1)
+    put(b.types, 0)
+    return id
+}
+
+pub fun sampler_type(b: Builder) -> u32 {
+    id := new_id(b)
+    begin(b.types, 26, 2)
+    put(b.types, id)
+    return id
+}
+
+pub fun sampled_image_type(b: Builder, image: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 27, 3)
+    put(b.types, id)
+    put(b.types, image)
+    return id
+}
+
+// Begins a struct with `count` members. The caller writes each member type id with put_type.
+pub fun struct_begin(b: Builder, count: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 30, 2 + count)
+    put(b.types, id)
+    return id
+}
+
+pub fun put_type(b: Builder, member: u32) {
+    put(b.types, member)
+}
+
+pub fun constant_f32(b: Builder, float: u32, value: f32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 43, 4)
+    put(b.types, float)
+    put(b.types, id)
+    put(b.types, float_bits(value))
+    return id
+}
+
+pub fun constant_int(b: Builder, int: u32, value: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 43, 4)
+    put(b.types, int)
+    put(b.types, id)
+    put(b.types, value)
+    return id
+}
+
+// A module-scope variable. Descriptor and push-constant variables are not interface entries.
+pub fun global_variable(b: Builder, pointer: u32, storage: u32) -> u32 {
+    id := new_id(b)
+    begin(b.types, 59, 4)
+    put(b.types, pointer)
+    put(b.types, id)
+    put(b.types, storage)
+    return id
+}
+
+// An Input or Output variable at a location. It joins the entry point's interface list.
+pub fun io_variable(b: Builder, pointer: u32, storage: u32, location: u32) -> u32 {
+    id := global_variable(b, pointer, storage)
+    decorate(b, id, 30, location)
+    put(b.iface, id)
+    return id
+}
+
+// A built-in output such as Position, also part of the interface.
+pub fun builtin_output(b: Builder, pointer: u32, builtin: u32) -> u32 {
+    id := global_variable(b, pointer, 3)
+    decorate(b, id, 11, builtin)
+    put(b.iface, id)
+    return id
+}
+
+// Functions and instructions (written to the code stream) -------------------------------------
+
+pub fun function_begin(b: Builder, result: u32, function_type_id: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 54, 5)
+    put(b.code, result)
+    put(b.code, id)
+    put(b.code, 0)
+    put(b.code, function_type_id)
+    return id
+}
+
+pub fun label(b: Builder) -> u32 {
+    id := new_id(b)
+    begin(b.code, 248, 2)
+    put(b.code, id)
+    return id
+}
+
+pub fun return_void(b: Builder) {
+    begin(b.code, 253, 1)
+}
+
+pub fun function_end(b: Builder) {
+    begin(b.code, 56, 1)
+}
+
+// result = op(x) with result type `ty`.
+pub fun unary(b: Builder, opcode: u32, ty: u32, x: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, opcode, 4)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, x)
+    return id
+}
+
+// result = op(x, y) with result type `ty`. Also used for OpMatrixTimesVector, OpDot, OpVectorTimesScalar.
+pub fun binary(b: Builder, opcode: u32, ty: u32, x: u32, y: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, opcode, 5)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, x)
+    put(b.code, y)
+    return id
+}
+
+pub fun load(b: Builder, ty: u32, pointer: u32) -> u32 => unary(b, 61, ty, pointer)
+
+pub fun store(b: Builder, pointer: u32, value: u32) {
+    begin(b.code, 62, 3)
+    put(b.code, pointer)
+    put(b.code, value)
+}
+
+pub fun access_chain(b: Builder, pointer: u32, base: u32, index: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 65, 5)
+    put(b.code, pointer)
+    put(b.code, id)
+    put(b.code, base)
+    put(b.code, index)
+    return id
+}
+
+pub fun extract(b: Builder, ty: u32, composite: u32, index: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 81, 5)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, composite)
+    put(b.code, index)
+    return id
+}
+
+pub fun construct3(b: Builder, ty: u32, x: u32, y: u32, z: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 80, 6)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, x)
+    put(b.code, y)
+    put(b.code, z)
+    return id
+}
+
+pub fun construct4(b: Builder, ty: u32, x: u32, y: u32, z: u32, w: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 80, 7)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, x)
+    put(b.code, y)
+    put(b.code, z)
+    put(b.code, w)
+    return id
+}
+
+// The first three components of a vec4 (or a vec3 copy) as a vec3.
+pub fun shuffle3(b: Builder, ty: u32, v: u32, a: u32, c: u32, d: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 79, 8)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, v)
+    put(b.code, v)
+    put(b.code, a)
+    put(b.code, c)
+    put(b.code, d)
+    return id
+}
+
+pub fun ext1(b: Builder, ty: u32, set: u32, instruction: u32, x: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 12, 6)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, set)
+    put(b.code, instruction)
+    put(b.code, x)
+    return id
+}
+
+pub fun ext2(b: Builder, ty: u32, set: u32, instruction: u32, x: u32, y: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 12, 7)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, set)
+    put(b.code, instruction)
+    put(b.code, x)
+    put(b.code, y)
+    return id
+}
+
+pub fun ext3(b: Builder, ty: u32, set: u32, instruction: u32, x: u32, y: u32, z: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 12, 8)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, set)
+    put(b.code, instruction)
+    put(b.code, x)
+    put(b.code, y)
+    put(b.code, z)
+    return id
+}
+
+pub fun sampled_image(b: Builder, sampled_type: u32, image: u32, sampler: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 86, 5)
+    put(b.code, sampled_type)
+    put(b.code, id)
+    put(b.code, image)
+    put(b.code, sampler)
+    return id
+}
+
+pub fun sample(b: Builder, ty: u32, sampled: u32, coord: u32) -> u32 {
+    id := new_id(b)
+    begin(b.code, 87, 5)
+    put(b.code, ty)
+    put(b.code, id)
+    put(b.code, sampled)
+    put(b.code, coord)
+    return id
+}
+
+// Assembly ----------------------------------------------------------------------------------
+
+fun append(out: *Stream, source: *Stream) {
+    current := *source
+    mut i: u64 = 0
+    while i < current.count {
+        put(out, read_word(current, i))
+        i += 1
+    }
+}
+
+// Joins the streams into one module with a single entry point named "main".
+// model is 0 for vertex and 4 for fragment; fragments get OriginUpperLeft.
+pub fun finish(b: Builder, model: u32, entry: u32) -> Module {
+    head := *b.head
+    decor := *b.decor
+    types := *b.types
+    code := *b.code
+    iface := *b.iface
+    ids := *b.ids
+    mut mode_words: u64 = 0
+    when model == 4 { mode_words = 3 }
+    // Header 5 words, entry point 5 + interfaces, optional execution mode, then the sections.
+    total := 5 + head.count + 5 + iface.count + mode_words + decor.count + types.count + code.count
+    out := stream_new(total)
+    put(out, 119734787)
+    put(out, 65536)
+    put(out, 0)
+    put(out, ids.count as u32)
+    put(out, 0)
+    append(out, b.head)
+    begin(out, 15, 5 + (iface.count as u32))
+    put(out, model)
+    put(out, entry)
+    put(out, 1852399981)
+    put(out, 0)
+    append(out, b.iface)
+    when model == 4 {
+        begin(out, 16, 3)
+        put(out, entry)
+        put(out, 7)
+    }
+    append(out, b.decor)
+    append(out, b.types)
+    append(out, b.code)
+    written := *out
+    result := Module { data: written.data, bytes: written.count * 4 }
+    memory::release(out as *u8)
+    return result
+}

@@ -164,3 +164,33 @@ fun slab(origin: f32, direction: f32, min: f32, max: f32) -> Slab {
     b := (max - origin) / direction
     return Slab { near: math::scalar_min(a, b), far: math::scalar_max(a, b), valid: true }
 }
+
+// Linear distance fog for 3D draws. Pixels blend toward the fog colour by their distance from the eye.
+pub struct Fog { pub enabled: bool, pub color: math::Color, pub start: f32, pub end: f32 }
+extend Fog {
+    pub fun linear(color: math::Color, start: f32, end: f32) -> Fog => Fog { enabled: true, color: color, start: start, end: end }
+    pub fun off() -> Fog => Fog { enabled: false, color: math::Color::rgb(0, 0, 0), start: 0.0, end: 0.0 }
+    // 0 up to start, 1 from end on, linear in between. An end not beyond start is a hard edge.
+    pub fun factor(self, distance: f32) -> f32 {
+        when distance <= self.start { return 0.0 }
+        when self.end <= self.start || distance >= self.end { return 1.0 }
+        return (distance - self.start) / (self.end - self.start)
+    }
+}
+
+// A point light that fades linearly to nothing at radius. Intensity 0 turns it off.
+// Lighting is evaluated per pixel in the mesh fragment shader (see shaders.ryn).
+pub struct PointLight { pub position: math::Vec3, pub color: math::Color, pub intensity: f32, pub radius: f32 }
+extend PointLight {
+    pub fun new(position: math::Vec3, color: math::Color, intensity: f32, radius: f32) -> PointLight {
+        return PointLight { position: position, color: color, intensity: intensity, radius: radius }
+    }
+    pub fun off() -> PointLight => PointLight { position: math::Vec3::ZERO, color: math::Color::rgb(0, 0, 0), intensity: 0.0, radius: 0.0 }
+    // Light reaching a point: intensity at the light, falling to 0 at radius.
+    pub fun strength_at(self, point: math::Vec3) -> f32 {
+        when self.intensity <= 0.0 || self.radius <= 0.0 { return 0.0 }
+        distance := point.sub(self.position).length()
+        when distance >= self.radius { return 0.0 }
+        return self.intensity * (1.0 - distance / self.radius)
+    }
+}

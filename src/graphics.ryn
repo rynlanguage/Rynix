@@ -6,16 +6,32 @@ use rynix::vk_data
 use rynix::assets
 use rynix::texture
 use rynix::mesh_backend
-use rynix::mesh_vertex
-use rynix::mesh_fragment
+use rynix::shaders
+use rynix::spirv
 use rynix::model
+use rynix::text
 #[repr(C)]
-struct MeshPush { mvp: math::Mat4, yaw: f32, sx: f32, sy: f32, sz: f32, sun_x: f32, sun_y: f32, sun_z: f32, sun_intensity: f32, ambient_r: f32, ambient_g: f32, ambient_b: f32, ambient_intensity: f32, base_color: u32, sun_color: u32, pad0: u32, pad1: u32 }
+// Push constants for the mesh shaders in shaders.ryn. Every field is 4 bytes; the block is 224 bytes.
+struct MeshPush {
+    mvp: math::Mat4, yaw: f32, sx: f32, sy: f32, sz: f32,
+    sun_x: f32, sun_y: f32, sun_z: f32, sun_intensity: f32,
+    ambient_r: f32, ambient_g: f32, ambient_b: f32, ambient_intensity: f32,
+    base_color: u32, sun_color: u32, pad0: u32, pad1: u32,
+    origin_x: f32, origin_y: f32, origin_z: f32, origin_pad: f32,
+    eye_x: f32, eye_y: f32, eye_z: f32, eye_pad: f32,
+    point_x: f32, point_y: f32, point_z: f32, point_radius: f32,
+    point_r: f32, point_g: f32, point_b: f32, point_intensity: f32,
+    fog_r: f32, fog_g: f32, fog_b: f32, fog_enabled: f32,
+    fog_start: f32, fog_end: f32, fog_pad0: f32, fog_pad1: f32,
+}
+// Size of the mesh push block; the shader layout in shaders.ryn expects this exact value.
+pub fun mesh_push_size() -> u32 => sizeof(MeshPush) as u32
 type MeshBindVertexFn = extern "C" fun(*u8, u32, u32, **u8, *u64)
 type MeshBindIndexFn = extern "C" fun(*u8, *u8, u64, u32)
 type MeshDrawIndexedFn = extern "C" fun(*u8, u32, u32, u32, i32, u32)
 type MeshBindSetsFn = extern "C" fun(*u8, u32, *u8, u32, u32, **u8, u32, *u8)
 fun packed_color(color: math::Color) -> u32 => (color.r as u32) | ((color.g as u32) << 8) | ((color.b as u32) << 16) | ((color.a as u32) << 24)
+
 
 // Public facade constructors; CPU storage and Vulkan interop keep separate ownership.
 namespace graphics;
@@ -1130,36 +1146,30 @@ fun make_fragment_shader(device: *u8, create: *u8) -> *u8 {
     return created(result, out)
 }
 
-fun make_cube_vertex_shader(device: *u8, create: *u8) -> *u8 {
-    when pointer_is_null(create) { return null_handle() }
-    mut words := mesh_vertex::shader()
+// Creates a shader module from SPIR-V words. Vulkan copies the code, so the buffer is freed afterwards.
+fun create_module(device: *u8, create: *u8, module: spirv::Module) -> *u8 {
     mut info := VkShaderInfo {
         s_type: 16,
         next: null_handle(),
         flags: 0,
-        code_size: mesh_vertex::size(),
-        code: (&raw words) as *u8,
+        code_size: module.bytes,
+        code: module.data,
     }
     call: VkCreateShaderFn = create as VkCreateShaderFn
     mut out := VkOut { value: null_handle() }
     result := call(device, &raw mut info, null_handle(), &raw mut out)
+    spirv::release_module(module)
     return created(result, out)
+}
+
+fun make_cube_vertex_shader(device: *u8, create: *u8) -> *u8 {
+    when pointer_is_null(create) { return null_handle() }
+    return create_module(device, create, shaders::mesh_vertex())
 }
 
 fun make_cube_fragment_shader(device: *u8, create: *u8) -> *u8 {
     when pointer_is_null(create) { return null_handle() }
-    mut words := mesh_fragment::shader()
-    mut info := VkShaderInfo {
-        s_type: 16,
-        next: null_handle(),
-        flags: 0,
-        code_size: mesh_fragment::size(),
-        code: (&raw words) as *u8,
-    }
-    call: VkCreateShaderFn = create as VkCreateShaderFn
-    mut out := VkOut { value: null_handle() }
-    result := call(device, &raw mut info, null_handle(), &raw mut out)
-    return created(result, out)
+    return create_module(device, create, shaders::mesh_fragment())
 }
 
 fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vertex: *u8, fragment: *u8, depth_test: u32, depth_write: u32, depth_compare: u32, push_size: u32, set_layout: *u8) -> VkPipelineBundle {
@@ -1202,7 +1212,7 @@ fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vert
         normal: VkAttribute { location: 1, binding: 0, format: 106, offset: 12 },
         uv: VkAttribute { location: 2, binding: 0, format: 103, offset: 24 },
     }
-    when push_size == 128 {
+    when push_size == 224 {
         vertex_info.binding_count = 1 vertex_info.bindings = (&raw binding) as *u8
         vertex_info.attribute_count = 3 vertex_info.attributes = (&raw attributes) as *u8
     }
@@ -1231,7 +1241,7 @@ fun make_pipeline(device: *u8, layout_fn: *u8, pipeline_fn: *u8, pass: *u8, vert
         bias_slope: 0.0,
         line_width: 1.0,
     }
-    when push_size == 128 { raster.cull = 2 raster.front = 0 }
+    when push_size == 224 { raster.cull = 2 raster.front = 0 }
     mut multi := VkSampleInfo {
         s_type: 24,
         next: null_handle(),
@@ -1458,6 +1468,24 @@ fun submit_present(
         queue_idle: VkQueueWaitFn = wait_fn as VkQueueWaitFn
         queue_idle(queue)
     }
+}
+
+// VkPhysicalDeviceProperties is 824 bytes on 64-bit builds; the buffer is larger than that.
+#[repr(C)]
+struct PhysicalProperties { bytes: [u8; 1024] }
+type PhysicalPropertiesFn = extern "C" fun(*u8, *PhysicalProperties)
+
+// limits.maxPushConstantsSize is byte 328 on 64-bit builds. The limits struct holds VkDeviceSize
+// fields, so it is 8-byte aligned and starts at 296 rather than 292; it is the ninth u32 in it.
+fun max_push_constants(get_instance: *u8, instance: *u8, physical: *u8) -> u32 {
+    getter := vk_data::resolve(get_instance, instance, mesh_backend::name("vkGetPhysicalDeviceProperties"))
+    when pointer_is_null(getter) { return 0 }
+    mut props := PhysicalProperties { bytes: [0; 1024] }
+    call: PhysicalPropertiesFn = getter as PhysicalPropertiesFn
+    call(physical, &raw mut props)
+    base := (&raw mut props) as *u8
+    limit := (base as u64 + 328) as *u32
+    return *limit
 }
 
 #[drop(drop_gpu)]
@@ -1737,6 +1765,18 @@ extend Gpu {
         context.sun_x = direction.x context.sun_y = direction.y context.sun_z = direction.z
         context.sun_intensity = math::scalar_max(light.intensity, 0.0) context.sun_color = packed_color(light.color)
     }
+    // Distance fog for later 3D draws, applied per pixel in the mesh fragment shader.
+    pub fun set_fog(self, fog: three_d::Fog) {
+        when pointer_is_null(self.resources as *u8) { return }
+        context := self.resources
+        context.fog = fog
+    }
+    // Point light for later 3D draws. Intensity 0 turns it off.
+    pub fun set_point_light(self, light: three_d::PointLight) {
+        when pointer_is_null(self.resources as *u8) { return }
+        context := self.resources
+        context.point_light = light
+    }
     // Opens a Vulkan device for this Win32 window. Drawing stays on the frames begin() returns.
     pub fun open(hwnd: *u8) -> Gpu {
         when pointer_is_null(hwnd) { return blank_gpu(null_handle()) }
@@ -1753,6 +1793,8 @@ extend Gpu {
         chosen := choose_device(gpu.get_instance, gpu.instance, gpu.surface, hwnd)
         when chosen.ok == 0 { return gpu }
         gpu.physical = chosen.physical
+        // The mesh shaders take their whole lighting state through push constants.
+        when max_push_constants(gpu.get_instance, gpu.instance, gpu.physical) < mesh_push_size() { return gpu }
         gpu.family = chosen.family
         gpu.format = chosen.format
         gpu.width = chosen.width
@@ -1801,7 +1843,7 @@ extend Gpu {
         when pointer_is_null(gpu.cube_vertex) || pointer_is_null(gpu.cube_fragment) { return gpu }
         gpu.resources = mesh_backend::open(gpu.get_device, gpu.device, gpu.physical, gpu.get_instance, gpu.instance, gpu.queue, gpu.family)
         when pointer_is_null(gpu.resources as *u8) { return gpu }
-        cube_bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.cube_vertex, gpu.cube_fragment, 1, 1, 1, 128, gpu.resources.set_layout)
+        cube_bundle := make_pipeline(gpu.device, layout_fn, pipeline_fn, gpu.render_pass, gpu.cube_vertex, gpu.cube_fragment, 1, 1, 1, 224, gpu.resources.set_layout)
         gpu.cube_layout = cube_bundle.layout
         gpu.cube_pipeline = cube_bundle.pipeline
         when pointer_is_null(gpu.cube_pipeline) || pointer_is_null(gpu.cube_layout) { return gpu }
@@ -2117,6 +2159,37 @@ extend Frame {
         )
     }
 
+    // Draws ASCII text with the built-in 5x7 font as filled rectangles. (x, y) is the top-left pixel;
+    // scale is the size of one font pixel. Nothing is drawn for scale <= 0.
+    pub fun draw_text(self, x: i32, y: i32, label: str, scale: i32, color: Color) {
+        when scale <= 0 { return }
+        font := text::rows()
+        mut pen := x
+        for ch in label {
+            glyph := text::glyph_index(ch)
+            mut row: i32 = 0
+            while row < text::glyph_height() {
+                bits: u32 = font[glyph * 7 + (row as u64)] as u32
+                // Draw each run of lit pixels in a row as one rectangle.
+                mut col: i32 = 0
+                while col < text::glyph_width() {
+                    mut run: i32 = 0
+                    while col + run < text::glyph_width() && ((bits >> ((4 - col - run) as u32)) & (1 as u32)) == (1 as u32) {
+                        run += 1
+                    }
+                    when run > 0 {
+                        self.fill_rect(pen + col * scale, y + row * scale, run * scale, scale, color)
+                        col += run
+                    } else {
+                        col += 1
+                    }
+                }
+                row += 1
+            }
+            pen += text::advance() * scale
+        }
+    }
+
     fun draw_geometry(self, source: *assets::MeshData, image_source: *texture::TextureData, camera: three_d::Camera, center: math::Vec3, size: math::Vec3, yaw: f32, material: assets::Material) -> bool {
         when pointer_is_null(self.command) || pointer_is_null(self.resources as *u8) || pointer_is_null(self.cube_pipeline) { return false }
         when self.width == 0 || self.height == 0 || size.x <= 0.0 || size.y <= 0.0 || size.z <= 0.0 { return false }
@@ -2125,11 +2198,22 @@ extend Frame {
         when pointer_is_null(geometry as *u8) || pointer_is_null(image as *u8) { return false }
         model := math::Mat4::translation(center.x, center.y, center.z).mul(math::Mat4::rotation_y(yaw).mul(math::Mat4::scale(size.x, size.y, size.z)))
         context := self.resources
+        // Fog and the point light are read by the fragment shader, so they go in the push block here.
+        fog := context.fog
+        light := context.point_light
+        mut fog_on: f32 = 0.0
+        when fog.enabled { fog_on = 1.0 }
         mut push := MeshPush {
             mvp: camera.view_projection_for(self.width, self.height).mul(model), yaw: yaw, sx: size.x, sy: size.y, sz: size.z,
             sun_x: context.sun_x, sun_y: context.sun_y, sun_z: context.sun_z, sun_intensity: context.sun_intensity,
             ambient_r: context.ambient_r, ambient_g: context.ambient_g, ambient_b: context.ambient_b, ambient_intensity: context.ambient_intensity,
             base_color: packed_color(material.base_color), sun_color: context.sun_color, pad0: 0, pad1: 0,
+            origin_x: center.x, origin_y: center.y, origin_z: center.z, origin_pad: 0.0,
+            eye_x: camera.eye.x, eye_y: camera.eye.y, eye_z: camera.eye.z, eye_pad: 0.0,
+            point_x: light.position.x, point_y: light.position.y, point_z: light.position.z, point_radius: light.radius,
+            point_r: channel(light.color.r), point_g: channel(light.color.g), point_b: channel(light.color.b), point_intensity: light.intensity,
+            fog_r: channel(fog.color.r), fog_g: channel(fog.color.g), fog_b: channel(fog.color.b), fog_enabled: fog_on,
+            fog_start: fog.start, fog_end: fog.end, fog_pad0: 0.0, fog_pad1: 0.0,
         }
         bind: VkBindPipelineFn = self.bind_pipeline as VkBindPipelineFn
         bind(self.command, 0, self.cube_pipeline)
@@ -2142,7 +2226,7 @@ extend Frame {
         bind_index(self.command, geometry.indices, 0, 1)
         bind_sets(self.command, 0, self.cube_layout, 0, 1, &raw mut set, 0, 0 as *u8)
         push_cmd: VkPushCmdFn = self.push_constants as VkPushCmdFn
-        push_cmd(self.command, self.cube_layout, 17, 0, 128, (&raw push) as *u8)
+        push_cmd(self.command, self.cube_layout, 17, 0, 224, (&raw push) as *u8)
         draw(self.command, source.index_count, 1, 0, 0, 0)
         return true
     }

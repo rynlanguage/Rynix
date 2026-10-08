@@ -1,0 +1,103 @@
+// Deterministic procedural helpers: a seeded generator, integer-hash value noise, and a terrain
+// height helper built on them. The same seed always gives the same values. Pure CPU code.
+
+// xorshift32 generator. The state is never zero, so the sequence never stops.
+pub struct Random { state: u32 }
+
+extend Random {
+    pub fun new(seed: u32) -> Random {
+        mut state := seed
+        when state == 0 { state = 2463534242 }
+        return Random { state: state }
+    }
+
+    pub fun next_u32(mut self) -> u32 {
+        mut x := self.state
+        x = x ^ (x << (13 as u32))
+        x = x ^ (x >> (17 as u32))
+        x = x ^ (x << (5 as u32))
+        self.state = x
+        return x
+    }
+
+    // Uniform in [0, 1).
+    pub fun next_unit(mut self) -> f32 => (self.next_u32() as f32) / (4294967296.0 as f32)
+
+    // Uniform in [low, high). The bounds may be given in either order.
+    pub fun range(mut self, low: f32, high: f32) -> f32 => low + (high - low) * self.next_unit()
+
+    // Uniform integer in [low, high). Returns low when the range is empty.
+    pub fun range_i32(mut self, low: i32, high: i32) -> i32 {
+        when high <= low { return low }
+        span := (high - low) as u32
+        return low + ((self.next_u32() % span) as i32)
+    }
+}
+
+// Integer hash mapped to [0, 1] at a lattice point. Used as the corner value for value noise.
+pub fun lattice(x: i32, y: i32, seed: u32) -> f32 {
+    mut h: u32 = seed ^ ((x as u32) * 374761393) ^ ((y as u32) * 668265263)
+    h = (h ^ (h >> (13 as u32))) * 1274126177
+    h = h ^ (h >> (16 as u32))
+    return (h as f32) / (4294967295.0 as f32)
+}
+
+// Smooth 2D value noise in [0, 1]. Equal inputs and seed always give equal output.
+pub fun value_noise(x: f32, y: f32, seed: u32) -> f32 {
+    x0 := floor_i32(x)
+    y0 := floor_i32(y)
+    tx := smooth(x - (x0 as f32))
+    ty := smooth(y - (y0 as f32))
+    top := lerp(lattice(x0, y0, seed), lattice(x0 + 1, y0, seed), tx)
+    bottom := lerp(lattice(x0, y0 + 1, seed), lattice(x0 + 1, y0 + 1, seed), tx)
+    return lerp(top, bottom, ty)
+}
+
+// Sum of `octaves` noise layers, each at double frequency and half amplitude. Result in [0, 1].
+pub fun fractal_noise(x: f32, y: f32, octaves: i32, seed: u32) -> f32 {
+    mut total: f32 = 0.0
+    mut amplitude: f32 = 1.0
+    mut frequency: f32 = 1.0
+    mut weight: f32 = 0.0
+    mut i: i32 = 0
+    while i < octaves {
+        total += value_noise(x * frequency, y * frequency, seed + (i as u32)) * amplitude
+        weight += amplitude
+        amplitude = amplitude * 0.5
+        frequency = frequency * 2.0
+        i += 1
+    }
+    when weight <= 0.0 { return 0.0 }
+    return total / weight
+}
+
+// Height field for terrain. `scale` is the horizontal feature size, `height` the maximum output.
+pub struct Terrain {
+    pub seed: u32,
+    pub scale: f32,
+    pub height: f32,
+    pub octaves: i32,
+}
+
+extend Terrain {
+    pub fun new(seed: u32, scale: f32, height: f32) -> Terrain {
+        return Terrain { seed: seed, scale: scale, height: height, octaves: 4 }
+    }
+
+    // Height at world (x, z), in [0, height]. A non-positive scale is treated as 1.
+    pub fun height_at(self, x: f32, z: f32) -> f32 {
+        mut scale := self.scale
+        when scale <= 0.0 { scale = 1.0 }
+        return fractal_noise(x / scale, z / scale, self.octaves, self.seed) * self.height
+    }
+}
+
+fun floor_i32(value: f32) -> i32 {
+    mut i := value as i32
+    when (i as f32) > value { i -= 1 }
+    return i
+}
+
+fun smooth(t: f32) -> f32 => t * t * (3.0 - 2.0 * t)
+
+fun lerp(a: f32, b: f32, t: f32) -> f32 => a + (b - a) * t

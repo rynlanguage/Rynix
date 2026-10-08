@@ -4,6 +4,7 @@ use rynix::texture
 use rynix::memory
 use rynix::file_data
 use rynix::vk_data
+use rynix::three_d
 #[repr(C)]
 struct BufferInfo { kind: u32, next: *u8, flags: u32, size: u64, usage: u32, sharing: u32, count: u32, families: *u8 }
 #[repr(C)]
@@ -26,6 +27,8 @@ pub struct Context {
     pub cube: *assets::MeshData, pub plane: *assets::MeshData, pub sphere: *assets::MeshData, pub white: *texture::TextureData,
     pub sun_x: f32, pub sun_y: f32, pub sun_z: f32, pub sun_intensity: f32, pub sun_color: u32,
     pub ambient_r: f32, pub ambient_g: f32, pub ambient_b: f32, pub ambient_intensity: f32,
+    // CPU-side fog and point light. Applied to each object's colour before it is sent to the shader.
+    pub fog: three_d::Fog, pub point_light: three_d::PointLight,
 }
 pub fun name(text: str) -> vk_data::VkText {
     value := String(text)
@@ -134,6 +137,8 @@ pub fun open(getter: *u8, device: *u8, physical: *u8, instance_getter: *u8, inst
     context.getter = getter context.device = device context.physical = physical context.instance_getter = instance_getter context.instance = instance context.queue = queue context.family = family
     context.sun_x = -0.4 context.sun_y = -1.0 context.sun_z = -0.3 context.sun_intensity = 0.8 context.sun_color = 4294967295
     context.ambient_r = 1.0 context.ambient_g = 1.0 context.ambient_b = 1.0 context.ambient_intensity = 0.25
+    context.fog = three_d::Fog::off()
+    context.point_light = three_d::PointLight::off()
     mut bindings := Bindings { image: Binding { binding: 0, kind: 2, count: 1, stages: 16, immutable: 0 as *u8 }, sampler: Binding { binding: 1, kind: 0, count: 1, stages: 16, immutable: 0 as *u8 } }
     mut info := LayoutInfo { kind: 32, next: 0 as *u8, flags: 0, count: 2, bindings: (&raw bindings) as *u8 }
     create_layout: MbLayoutFn = proc(context, "vkCreateDescriptorSetLayout") as MbLayoutFn

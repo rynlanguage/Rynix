@@ -8,8 +8,10 @@ ray/collision queries. Existing immediate 2D drawing and `draw_cube` remain.
 The library code, asset readers, geometry generation, and platform/Vulkan
 interop are written in Ryn. Windows system libraries provide windowing and PNG
 decoding. No companion DLL or Rust build is required by a game using Rynix.
-The shader generator under `tools/shaders` is a maintainer tool; generated
-SPIR-V words are already shipped in `src/`.
+The 2D shaders are pre-generated SPIR-V words in `src/vk_data.ryn`. The 3D mesh
+shaders are assembled in Ryn when a `Gpu` opens: `src/spirv.ryn` writes the SPIR-V
+module, and `src/shaders.ryn` describes the vertex and fragment stages with it. No
+GLSL or external compiler is involved.
 
 **Compiler requirement:** use the current Ryn source tree with the FFI/borrow
 fixes described in [README-VALIDATION.md](README-VALIDATION.md). An older
@@ -24,7 +26,7 @@ project's `ryn.yaml`; manual source copying is unnecessary:
 
 ```yaml
 dependencies:
-  rynix: "0.3.0"
+  rynix: "0.3.1"
 ```
 
 When developing against this checkout, use a path dependency:
@@ -137,7 +139,7 @@ PNG decoding preserves RGBA. GPU upload uses a staging buffer, optimal image,
 layout transitions, image view, sampler, and descriptor sets. The current 3D
 pipeline is opaque: it does not implement alpha blending, mipmaps, or sRGB/PBR.
 `metallic` and `roughness` are stored for later shading; the current shader
-uses base color, texture, and Lambert lighting.
+uses base color, texture, Lambert sun and ambient light, the point light, and fog.
 
 ## Cameras, light, and queries
 
@@ -217,6 +219,48 @@ colors, column-major Mat4 translation/scale/rotations/perspective/look_at/mul/
 transform_point, pi/radians/degrees/lerp, and scalar_min/scalar_max/clamp_value.
 `time::Clock` has start/tick/delta/elapsed/fps; tick caps long stalls at 0.25 s.
 
+## Gameplay helpers
+
+These modules are pure Ryn. They are CPU-side and need no Vulkan device, except
+where a Gpu method is named.
+
+**Character and collision** (`rynix::physics`). `CharacterController::new(feet,
+size)` describes a box by its bottom-centre position and full extent. `step(&solids,
+dt)` applies gravity (`gravity`, default 20 units/s²), then moves the box one axis at
+a time against `three_d::Aabb` solids, with sub-steps of at most 0.1 units. Surfaces
+that are only touched do not block. `grounded` is true after landing; `jump()` starts
+a jump of `jump_speed` (default 7) only while grounded. Solids are a slice, so
+`solids.as_slice()` on a `Vec<Aabb>` is the usual call. Collision is axis-aligned
+boxes only, with no slopes, steps, or rotation.
+
+**Procedural helpers** (`rynix::procgen`). `Random::new(seed)` is a xorshift32
+generator with `next_u32`, `next_unit` (`[0, 1)`), `range`, and `range_i32`.
+`value_noise(x, y, seed)` and `fractal_noise(x, y, octaves, seed)` return values in
+`[0, 1]`. `Terrain::new(seed, scale, height)` with `height_at(x, z)` returns a height
+in `[0, height]`. The same seed always gives the same output.
+
+**Text** (`rynix::text` and `Frame::draw_text`). A built-in 5x7 bitmap font covers
+printable ASCII. Lowercase letters draw as capitals, and other codes draw as a solid
+box. `frame.draw_text(x, y, label, scale, color)` draws with filled rectangles, so it
+needs no texture. `text::width(label, scale)` gives the pixel width. Text is drawn
+after the 3D scene for HUD use; each lit row run is one 2D draw.
+
+**Audio** (`rynix::audio`). The Windows waveOut API, through winmm, plays 16-bit mono
+PCM at 44100 Hz. `Sound::tone(frequency, seconds, volume)` and `Sound::silence(seconds)`
+generate samples in Ryn. `Output::open()` gives a device; `is_ready()` reports whether
+it opened. `play(&sound)` stops any sound already playing and returns whether the new
+one started. `is_playing()` and `wait()` track completion. Without a device, `open`
+returns an output that reports not ready and does nothing.
+
+**Fog and point light** (`three_d::Fog`, `three_d::PointLight`, `gpu.set_fog`,
+`gpu.set_point_light`). Both are evaluated per pixel in the mesh fragment shader.
+Fog is linear in distance from the eye: `Fog::linear(color, start, end)`, and
+`Fog::off()` disables it. A point light fades linearly to zero at its radius and adds
+`colour * intensity * falloff * max(dot(normal, to_light), 0)`; `intensity 0` turns it
+off. The mesh push block is 224 bytes, so `Gpu::open` requires a device whose
+`maxPushConstantsSize` is at least 224 (256 is common). If it is smaller, the Gpu is
+not ready. 2D drawing is unaffected.
+
 ## Examples and verification
 
 Run from this repository's root so sample asset paths resolve:
@@ -233,11 +277,15 @@ textured GLB crates, and a ray-based crosshair highlight. It uses the controls
 in the minimal example. The original quick_start/window/math_check/window_smoke/
 graphics_smoke examples remain. New camera_check and cpu_3d are GPU-free;
 native_3d_smoke validates resources, input edges, resize/minimize/restore, and
-closing. input_smoke is an interactive Raw Input/focus regression.
+closing. input_smoke is an interactive Raw Input/focus regression. physics_check and
+features_check are GPU-free checks of the gameplay helpers. audio_smoke plays two
+short tones through the default wave device. game_features is an interactive demo
+of procedural terrain, a character with gravity and jumping, fog, a point light,
+text, and audio; the unattended test script does not run it.
 
 See [README-VALIDATION.md](README-VALIDATION.md) for architecture, compiler fixes,
 test commands, and the separate compile/CPU/native/image evidence gates.
-The backend currently supports Windows/Vulkan. Audio remains unimplemented.
+The backend currently supports Windows/Vulkan, and audio uses Windows winmm.
 
 ## License
 

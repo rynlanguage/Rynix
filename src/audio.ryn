@@ -1,1 +1,228 @@
-// Audio abstractions are reserved for a later implementation.
+// Audio output through the Windows multimedia API (winmm waveOut), 16-bit mono PCM.
+// Sounds are generated in Ryn code; an Output plays one Sound at a time.
+use std::math
+use rynix::memory
+
+pub fun default_rate() -> u32 => 44100
+
+#[repr(C)]
+struct WaveFormat { format_tag: u16, channels: u16, samples_per_sec: u32, avg_bytes_per_sec: u32, block_align: u16, bits_per_sample: u16, size: u16, pad: u16 }
+#[repr(C)]
+struct WaveHeader { data: *u8, length: u32, recorded: u32, user: u64, flags: u32, loops: u32, next: *u8, reserved: u64 }
+// waveOutOpen writes the device handle through its first argument.
+#[repr(C)]
+struct WaveDeviceOut { handle: *u8 }
+
+type WaveOutOpenFn = extern "C" fun(*WaveDeviceOut, u32, *WaveFormat, u64, u64, u32) -> u32
+type WaveOutHandleFn = extern "C" fun(*u8) -> u32
+type WaveOutHeaderFn = extern "C" fun(*u8, *WaveHeader, u32) -> u32
+type SleepFn = extern "C" fun(u32)
+
+// WHDR_DONE is set by the driver when it has finished playing a prepared header.
+fun header_done() -> u32 => 1
+fun header_size() -> u32 => 48
+// WAVE_MAPPER selects the default output device.
+fun wave_mapper() -> u32 => 4294967295
+
+// Owned mono 16-bit samples at a fixed rate.
+pub struct Sound {
+    samples: Vec<i16>,
+    rate: u32,
+}
+
+extend Sound {
+    // A sine tone with short fades at both ends to avoid clicks. volume is in [0, 1].
+    pub fun tone(frequency: f32, seconds: f32, volume: f32) -> Sound {
+        rate := default_rate()
+        mut samples := Vec<i16>()
+        when seconds <= 0.0 || frequency <= 0.0 { return Sound { samples: samples, rate: rate } }
+        count := (seconds * (rate as f32)) as i64
+        fade := (rate / 200) as i64
+        mut level := volume
+        when level < 0.0 { level = 0.0 }
+        when level > 1.0 { level = 1.0 }
+        mut i: i64 = 0
+        while i < count {
+            phase := (i as f64) * (frequency as f64) / (rate as f64)
+            mut gain := level * 32000.0
+            when i < fade { gain = gain * (i as f32) / (fade as f32) }
+            when count - i <= fade { gain = gain * ((count - i) as f32) / (fade as f32) }
+            value := math::sin(phase * 6.283185307179586) as f32 * gain
+            samples.push(value as i16)
+            i += 1
+        }
+        return Sound { samples: samples, rate: rate }
+    }
+
+    // Silence for the given number of seconds.
+    pub fun silence(seconds: f32) -> Sound {
+        rate := default_rate()
+        mut samples := Vec<i16>()
+        when seconds > 0.0 {
+            count := (seconds * (rate as f32)) as i64
+            mut i: i64 = 0
+            while i < count {
+                samples.push(0)
+                i += 1
+            }
+        }
+        return Sound { samples: samples, rate: rate }
+    }
+
+    pub fun sample_count(self) -> u64 => self.samples.len()
+    // Sample at index, or 0 when index is past the end.
+    pub fun sample(self, index: u64) -> i16 {
+        when index >= self.samples.len() { return 0 }
+        return self.samples[index]
+    }
+    pub fun rate(self) -> u32 => self.rate
+    pub fun seconds(self) -> f32 => (self.samples.len() as f32) / (self.rate as f32)
+}
+
+// Owns the winmm library, the wave device, and the buffer that is being played.
+#[drop(drop_output)]
+pub struct Output {
+    library: *u8,
+    device: *u8,
+    open_fn: *u8,
+    close_fn: *u8,
+    reset_fn: *u8,
+    prepare_fn: *u8,
+    unprepare_fn: *u8,
+    write_fn: *u8,
+    sleep_fn: *u8,
+    header: *u8,
+    data: *u8,
+    capacity: u64,
+    prepared: bool,
+}
+
+// The library is the first field, which Ryn Guard reads as the owned resource; it is set here and never reassigned.
+fun blank_output(library: *u8) -> Output {
+    return Output {
+        library: library,
+        device: 0 as *u8,
+        open_fn: 0 as *u8,
+        close_fn: 0 as *u8,
+        reset_fn: 0 as *u8,
+        prepare_fn: 0 as *u8,
+        unprepare_fn: 0 as *u8,
+        write_fn: 0 as *u8,
+        sleep_fn: 0 as *u8,
+        header: 0 as *u8,
+        data: 0 as *u8,
+        capacity: 0,
+        prepared: false,
+    }
+}
+
+fun drop_output(output: Output) {
+    // The device must stop before its buffers are freed, so reset and unprepare first.
+    when !pointer_is_null(output.device) {
+        when !pointer_is_null(output.reset_fn) {
+            reset: WaveOutHandleFn = output.reset_fn as WaveOutHandleFn
+            reset(output.device)
+        }
+        when output.prepared && !pointer_is_null(output.unprepare_fn) {
+            unprepare: WaveOutHeaderFn = output.unprepare_fn as WaveOutHeaderFn
+            unprepare(output.device, output.header as *WaveHeader, header_size())
+        }
+        when !pointer_is_null(output.close_fn) {
+            close: WaveOutHandleFn = output.close_fn as WaveOutHandleFn
+            close(output.device)
+        }
+    }
+    memory::release(output.data)
+    memory::release(output.header)
+    when !pointer_is_null(output.library) { unload_library(output.library) }
+}
+
+extend Output {
+    // Opens the default output device at the default rate, mono 16-bit. Check is_ready() afterwards.
+    pub fun open() -> Output {
+        library := load_library("winmm.dll")
+        mut output := blank_output(library)
+        when pointer_is_null(library) { return output }
+        output.open_fn = load_symbol(library, "waveOutOpen")
+        output.close_fn = load_symbol(library, "waveOutClose")
+        output.reset_fn = load_symbol(library, "waveOutReset")
+        output.prepare_fn = load_symbol(library, "waveOutPrepareHeader")
+        output.unprepare_fn = load_symbol(library, "waveOutUnprepareHeader")
+        output.write_fn = load_symbol(library, "waveOutWrite")
+        kernel := load_library("kernel32.dll")
+        output.sleep_fn = load_symbol(kernel, "Sleep")
+        unload_library(kernel)
+        when pointer_is_null(output.open_fn) || pointer_is_null(output.close_fn) || pointer_is_null(output.reset_fn) || pointer_is_null(output.prepare_fn) || pointer_is_null(output.unprepare_fn) || pointer_is_null(output.write_fn) { return output }
+        output.header = memory::allocate(header_size() as u64)
+        when pointer_is_null(output.header) { return output }
+        mut format := WaveFormat {
+            format_tag: 1,
+            channels: 1,
+            samples_per_sec: default_rate(),
+            avg_bytes_per_sec: default_rate() * 2,
+            block_align: 2,
+            bits_per_sample: 16,
+            size: 0,
+            pad: 0,
+        }
+        mut device := WaveDeviceOut { handle: 0 as *u8 }
+        open: WaveOutOpenFn = output.open_fn as WaveOutOpenFn
+        result := open(&raw mut device, wave_mapper(), &raw mut format, 0, 0, 0)
+        when result == 0 { output.device = device.handle }
+        return output
+    }
+
+    pub fun is_ready(self) -> bool => !pointer_is_null(self.device)
+
+    // Starts playing a sound. Any sound already playing is stopped. Returns false when nothing was started.
+    pub fun play(mut self, sound: &Sound) -> bool {
+        when !self.is_ready() || sound.sample_count() == 0 { return false }
+        self.stop()
+        bytes := sound.sample_count() * 2
+        when bytes > self.capacity {
+            memory::release(self.data)
+            self.data = memory::allocate(bytes)
+            self.capacity = bytes
+            when pointer_is_null(self.data) {
+                self.capacity = 0
+                return false
+            }
+        }
+        mut i: u64 = 0
+        while i < sound.sample_count() {
+            target := ((self.data as u64) + i * 2) as *i16
+            *target = sound.samples[i]
+            i += 1
+        }
+        header := self.header as *WaveHeader
+        *header = WaveHeader { data: self.data, length: bytes as u32, recorded: 0, user: 0, flags: 0, loops: 0, next: 0 as *u8, reserved: 0 }
+        prepare: WaveOutHeaderFn = self.prepare_fn as WaveOutHeaderFn
+        when prepare(self.device, header, header_size()) != 0 { return false }
+        self.prepared = true
+        write: WaveOutHeaderFn = self.write_fn as WaveOutHeaderFn
+        return write(self.device, header, header_size()) == 0
+    }
+
+    // Stops the current sound and releases its header. Safe to call when nothing is playing.
+    pub fun stop(mut self) {
+        when !self.is_ready() || !self.prepared { return }
+        reset: WaveOutHandleFn = self.reset_fn as WaveOutHandleFn
+        reset(self.device)
+        unprepare: WaveOutHeaderFn = self.unprepare_fn as WaveOutHeaderFn
+        unprepare(self.device, self.header as *WaveHeader, header_size())
+        self.prepared = false
+    }
+
+    pub fun is_playing(self) -> bool {
+        when !self.is_ready() || !self.prepared { return false }
+        header := self.header as *WaveHeader
+        return (header.flags & header_done()) == 0
+    }
+
+    // Blocks until the current sound finishes. Polls every millisecond.
+    pub fun wait(self) {
+        when pointer_is_null(self.sleep_fn) { return }
+        sleep: SleepFn = self.sleep_fn as SleepFn
+        while self.is_playing() { sleep(1) }
+    }
+}

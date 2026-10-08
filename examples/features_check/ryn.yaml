@@ -1,0 +1,8 @@
+name: rynix-features-check
+version: 0.3.0
+owner: rynix
+dependencies:
+  rynix:
+    path: ../..
+build:
+  optimize: speed

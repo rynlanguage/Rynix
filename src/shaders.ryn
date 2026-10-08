@@ -1,0 +1,312 @@
+// Built-in mesh shaders, assembled as SPIR-V by rynix::spirv when a Gpu opens.
+// The push-constant block is shared with graphics::MeshPush and is 224 bytes:
+//    0 mvp (mat4)              64 rotation_scale: yaw, sx, sy, sz
+//   80 sun: direction xyz, intensity w
+//   96 ambient: rgb, intensity w
+//  112 colors: base and sun as packed RGBA8 (x, y), then two unused words
+//  128 origin: object centre xyz
+//  144 eye: camera position xyz
+//  160 point light: position xyz, radius w
+//  176 point colour: rgb, intensity w
+//  192 fog colour: rgb, enabled w (1 or 0)
+//  208 fog range: start x, end y
+//
+// Vertex: transforms, and passes world position, world normal and uv to the fragment stage.
+// Fragment: samples the texture, then applies sun and ambient light, a point light with linear
+// falloff, and linear distance fog, all per pixel.
+use rynix::spirv
+
+struct Types {
+    void_ty: u32,
+    f32_ty: u32,
+    i32_ty: u32,
+    u32_ty: u32,
+    vec2: u32,
+    vec3: u32,
+    vec4: u32,
+    uvec4: u32,
+    mat4: u32,
+    fn_ty: u32,
+    glsl: u32,
+    f0: u32,
+    f1: u32,
+    eps_dist: u32,
+    eps_range: u32,
+}
+
+struct Push {
+    var: u32,
+    ptr_vec4: u32,
+    ptr_uvec4: u32,
+    ptr_mat4: u32,
+    idx: [u32; 11],
+}
+
+// Storage classes and decorations used below, named for readability.
+fun storage_input() -> u32 => 1
+fun storage_output() -> u32 => 3
+fun storage_uniform_constant() -> u32 => 0
+fun storage_push_constant() -> u32 => 9
+fun decoration_binding() -> u32 => 33
+fun decoration_descriptor_set() -> u32 => 34
+fun decoration_location() -> u32 => 30
+fun decoration_offset() -> u32 => 35
+fun decoration_matrix_stride() -> u32 => 7
+fun decoration_col_major() -> u32 => 5
+fun builtin_position() -> u32 => 0
+
+// Opcodes of the GLSL.std.450 extended set used here.
+fun glsl_fmax() -> u32 => 40
+fun glsl_fclamp() -> u32 => 43
+fun glsl_fmix() -> u32 => 46
+fun glsl_sin() -> u32 => 13
+fun glsl_cos() -> u32 => 14
+fun glsl_length() -> u32 => 66
+fun glsl_normalize() -> u32 => 69
+fun glsl_unpack_unorm4x8() -> u32 => 64
+
+// Core opcodes.
+fun op_fadd() -> u32 => 129
+fun op_fsub() -> u32 => 131
+fun op_fmul() -> u32 => 133
+fun op_fdiv() -> u32 => 136
+fun op_fnegate() -> u32 => 127
+fun op_dot() -> u32 => 148
+fun op_vector_times_scalar() -> u32 => 142
+fun op_matrix_times_vector() -> u32 => 145
+
+fun common(b: spirv::Builder) -> Types {
+    void_ty := spirv::void_type(b)
+    f32_ty := spirv::float_type(b)
+    i32_ty := spirv::int_type(b, 1)
+    u32_ty := spirv::int_type(b, 0)
+    vec2 := spirv::vector_type(b, f32_ty, 2)
+    vec3 := spirv::vector_type(b, f32_ty, 3)
+    vec4 := spirv::vector_type(b, f32_ty, 4)
+    uvec4 := spirv::vector_type(b, u32_ty, 4)
+    mat4 := spirv::matrix_type(b, vec4, 4)
+    fn_ty := spirv::function_type(b, void_ty)
+    glsl := spirv::ext_import(b, "GLSL.std.450")
+    return Types {
+        void_ty: void_ty,
+        f32_ty: f32_ty,
+        i32_ty: i32_ty,
+        u32_ty: u32_ty,
+        vec2: vec2,
+        vec3: vec3,
+        vec4: vec4,
+        uvec4: uvec4,
+        mat4: mat4,
+        fn_ty: fn_ty,
+        glsl: glsl,
+        f0: spirv::constant_f32(b, f32_ty, 0.0),
+        f1: spirv::constant_f32(b, f32_ty, 1.0),
+        eps_dist: spirv::constant_f32(b, f32_ty, 0.0001),
+        eps_range: spirv::constant_f32(b, f32_ty, 0.000001),
+    }
+}
+
+// Declares the push-constant block and the access helpers for its members.
+fun declare_push(b: spirv::Builder, t: Types) -> Push {
+    mut idx: [u32; 11] = [0; 11]
+    mut i: u64 = 0
+    while i < 11 {
+        idx[i] = spirv::constant_int(b, t.i32_ty, i as u32)
+        i += 1
+    }
+    block := spirv::struct_begin(b, 11)
+    spirv::put_type(b, t.mat4)
+    mut member: u64 = 1
+    while member < 11 {
+        when member == 4 { spirv::put_type(b, t.uvec4) } else { spirv::put_type(b, t.vec4) }
+        member += 1
+    }
+    spirv::decorate_block(b, block)
+    spirv::decorate_member(b, block, 0, decoration_offset(), 0)
+    spirv::decorate_member_flag(b, block, 0, decoration_col_major())
+    spirv::decorate_member(b, block, 0, decoration_matrix_stride(), 16)
+    mut offset_member: u64 = 1
+    while offset_member < 11 {
+        spirv::decorate_member(b, block, offset_member as u32, decoration_offset(), 48 + 16 * (offset_member as u32))
+        offset_member += 1
+    }
+    ptr_block := spirv::pointer_type(b, storage_push_constant(), block)
+    return Push {
+        var: spirv::global_variable(b, ptr_block, storage_push_constant()),
+        ptr_vec4: spirv::pointer_type(b, storage_push_constant(), t.vec4),
+        ptr_uvec4: spirv::pointer_type(b, storage_push_constant(), t.uvec4),
+        ptr_mat4: spirv::pointer_type(b, storage_push_constant(), t.mat4),
+        idx: idx,
+    }
+}
+
+fun load_vec4(b: spirv::Builder, t: Types, p: Push, member: u64) -> u32 {
+    pointer := spirv::access_chain(b, p.ptr_vec4, p.var, p.idx[member])
+    return spirv::load(b, t.vec4, pointer)
+}
+
+fun load_uvec4(b: spirv::Builder, t: Types, p: Push, member: u64) -> u32 {
+    pointer := spirv::access_chain(b, p.ptr_uvec4, p.var, p.idx[member])
+    return spirv::load(b, t.uvec4, pointer)
+}
+
+// Rotates a vec3 about +Y by yaw, given cos and sin: (c x + s z, y, -s x + c z).
+fun rotate_y(b: spirv::Builder, t: Types, v: u32, c: u32, s: u32) -> u32 {
+    x := spirv::extract(b, t.f32_ty, v, 0)
+    y := spirv::extract(b, t.f32_ty, v, 1)
+    z := spirv::extract(b, t.f32_ty, v, 2)
+    new_x := spirv::binary(b, op_fadd(), t.f32_ty, spirv::binary(b, op_fmul(), t.f32_ty, c, x), spirv::binary(b, op_fmul(), t.f32_ty, s, z))
+    minus_s := spirv::unary(b, op_fnegate(), t.f32_ty, s)
+    new_z := spirv::binary(b, op_fadd(), t.f32_ty, spirv::binary(b, op_fmul(), t.f32_ty, minus_s, x), spirv::binary(b, op_fmul(), t.f32_ty, c, z))
+    return spirv::construct3(b, t.vec3, new_x, y, new_z)
+}
+
+// Position and normal in world space, clip position for the rasteriser, and the uv.
+pub fun mesh_vertex() -> spirv::Module {
+    b := spirv::builder()
+    spirv::capability(b, 1)
+    t := common(b)
+    spirv::memory_model(b)
+    p := declare_push(b, t)
+    ptr_in_vec3 := spirv::pointer_type(b, storage_input(), t.vec3)
+    ptr_in_vec2 := spirv::pointer_type(b, storage_input(), t.vec2)
+    ptr_out_vec3 := spirv::pointer_type(b, storage_output(), t.vec3)
+    ptr_out_vec2 := spirv::pointer_type(b, storage_output(), t.vec2)
+    ptr_out_vec4 := spirv::pointer_type(b, storage_output(), t.vec4)
+    in_position := spirv::io_variable(b, ptr_in_vec3, storage_input(), 0)
+    in_normal := spirv::io_variable(b, ptr_in_vec3, storage_input(), 1)
+    in_uv := spirv::io_variable(b, ptr_in_vec2, storage_input(), 2)
+    out_normal := spirv::io_variable(b, ptr_out_vec3, storage_output(), 0)
+    out_uv := spirv::io_variable(b, ptr_out_vec2, storage_output(), 1)
+    out_world := spirv::io_variable(b, ptr_out_vec3, storage_output(), 2)
+    gl_position := spirv::builtin_output(b, ptr_out_vec4, builtin_position())
+    main := spirv::function_begin(b, t.void_ty, t.fn_ty)
+    spirv::label(b)
+    position := spirv::load(b, t.vec3, in_position)
+    normal := spirv::load(b, t.vec3, in_normal)
+    texcoord := spirv::load(b, t.vec2, in_uv)
+    rotation := load_vec4(b, t, p, 1)
+    yaw := spirv::extract(b, t.f32_ty, rotation, 0)
+    scale := spirv::shuffle3(b, t.vec3, rotation, 1, 2, 3)
+    origin := spirv::shuffle3(b, t.vec3, load_vec4(b, t, p, 5), 0, 1, 2)
+    mvp := spirv::load(b, t.mat4, spirv::access_chain(b, p.ptr_mat4, p.var, p.idx[0]))
+    clip_input := spirv::construct4(b, t.vec4,
+        spirv::extract(b, t.f32_ty, position, 0),
+        spirv::extract(b, t.f32_ty, position, 1),
+        spirv::extract(b, t.f32_ty, position, 2),
+        t.f1)
+    spirv::store(b, gl_position, spirv::binary(b, op_matrix_times_vector(), t.vec4, mvp, clip_input))
+    scaled := spirv::binary(b, op_fmul(), t.vec3, position, scale)
+    c := spirv::ext1(b, t.f32_ty, t.glsl, glsl_cos(), yaw)
+    s := spirv::ext1(b, t.f32_ty, t.glsl, glsl_sin(), yaw)
+    world := spirv::binary(b, op_fadd(), t.vec3, rotate_y(b, t, scaled, c, s), origin)
+    spirv::store(b, out_world, world)
+    unscaled := spirv::binary(b, op_fdiv(), t.vec3, normal, scale)
+    turned := rotate_y(b, t, unscaled, c, s)
+    spirv::store(b, out_normal, spirv::ext1(b, t.vec3, t.glsl, glsl_normalize(), turned))
+    spirv::store(b, out_uv, texcoord)
+    spirv::return_void(b)
+    spirv::function_end(b)
+    module := spirv::finish(b, 0, main)
+    spirv::release_builder(b)
+    return module
+}
+
+// Texture times base colour, then sun, ambient, point light, and fog, all per pixel.
+pub fun mesh_fragment() -> spirv::Module {
+    b := spirv::builder()
+    spirv::capability(b, 1)
+    t := common(b)
+    spirv::memory_model(b)
+    p := declare_push(b, t)
+    ptr_in_vec3 := spirv::pointer_type(b, storage_input(), t.vec3)
+    ptr_in_vec2 := spirv::pointer_type(b, storage_input(), t.vec2)
+    ptr_out_vec4 := spirv::pointer_type(b, storage_output(), t.vec4)
+    in_normal := spirv::io_variable(b, ptr_in_vec3, storage_input(), 0)
+    in_uv := spirv::io_variable(b, ptr_in_vec2, storage_input(), 1)
+    in_world := spirv::io_variable(b, ptr_in_vec3, storage_input(), 2)
+    out_color := spirv::io_variable(b, ptr_out_vec4, storage_output(), 0)
+    image_ty := spirv::image_type(b, t.f32_ty)
+    sampler_ty := spirv::sampler_type(b)
+    sampled_ty := spirv::sampled_image_type(b, image_ty)
+    image_var := spirv::global_variable(b, spirv::pointer_type(b, storage_uniform_constant(), image_ty), storage_uniform_constant())
+    spirv::decorate(b, image_var, decoration_descriptor_set(), 0)
+    spirv::decorate(b, image_var, decoration_binding(), 0)
+    sampler_var := spirv::global_variable(b, spirv::pointer_type(b, storage_uniform_constant(), sampler_ty), storage_uniform_constant())
+    spirv::decorate(b, sampler_var, decoration_descriptor_set(), 0)
+    spirv::decorate(b, sampler_var, decoration_binding(), 1)
+    main := spirv::function_begin(b, t.void_ty, t.fn_ty)
+    spirv::label(b)
+
+    world := spirv::load(b, t.vec3, in_world)
+    normal := spirv::ext1(b, t.vec3, t.glsl, glsl_normalize(), spirv::load(b, t.vec3, in_normal))
+    uv := spirv::load(b, t.vec2, in_uv)
+    texel := spirv::sample(b, t.vec4, spirv::sampled_image(b, sampled_ty, spirv::load(b, image_ty, image_var), spirv::load(b, sampler_ty, sampler_var)), uv)
+    base_bits := spirv::extract(b, t.u32_ty, load_uvec4(b, t, p, 4), 0)
+    base := spirv::binary(b, op_fmul(), t.vec4, spirv::ext1(b, t.vec4, t.glsl, glsl_unpack_unorm4x8(), base_bits), texel)
+    base_rgb := spirv::shuffle3(b, t.vec3, base, 0, 1, 2)
+    alpha := spirv::extract(b, t.f32_ty, base, 3)
+
+    // Sun: lambert against the direction the light travels, so the vector to the light is -normalize(dir).
+    sun := load_vec4(b, t, p, 2)
+    sun_dir := spirv::ext1(b, t.vec3, t.glsl, glsl_normalize(), spirv::shuffle3(b, t.vec3, sun, 0, 1, 2))
+    to_sun := spirv::unary(b, op_fnegate(), t.vec3, sun_dir)
+    lambert := spirv::ext2(b, t.f32_ty, t.glsl, glsl_fmax(), spirv::binary(b, op_dot(), t.f32_ty, normal, to_sun), t.f0)
+    sun_colour := spirv::ext1(b, t.vec4, t.glsl, glsl_unpack_unorm4x8(), spirv::extract(b, t.u32_ty, load_uvec4(b, t, p, 4), 1))
+    sun_light := spirv::binary(b, op_vector_times_scalar(), t.vec3,
+        spirv::shuffle3(b, t.vec3, sun_colour, 0, 1, 2),
+        spirv::binary(b, op_fmul(), t.f32_ty, spirv::extract(b, t.f32_ty, sun, 3), lambert))
+
+    // Ambient.
+    ambient := load_vec4(b, t, p, 3)
+    ambient_light := spirv::binary(b, op_vector_times_scalar(), t.vec3,
+        spirv::shuffle3(b, t.vec3, ambient, 0, 1, 2),
+        spirv::extract(b, t.f32_ty, ambient, 3))
+    lit_by_sky := spirv::binary(b, op_fadd(), t.vec3, ambient_light, sun_light)
+
+    // Point light: linear falloff to nothing at the radius, times facing, times intensity.
+    point_pos := load_vec4(b, t, p, 7)
+    point_colour := load_vec4(b, t, p, 8)
+    to_light := spirv::binary(b, op_fsub(), t.vec3, spirv::shuffle3(b, t.vec3, point_pos, 0, 1, 2), world)
+    distance := spirv::ext1(b, t.f32_ty, t.glsl, glsl_length(), to_light)
+    radius := spirv::ext2(b, t.f32_ty, t.glsl, glsl_fmax(), spirv::extract(b, t.f32_ty, point_pos, 3), t.eps_range)
+    falloff := spirv::ext2(b, t.f32_ty, t.glsl, glsl_fmax(),
+        spirv::binary(b, op_fsub(), t.f32_ty, t.f1, spirv::binary(b, op_fdiv(), t.f32_ty, distance, radius)),
+        t.f0)
+    inverse_distance := spirv::binary(b, op_fdiv(), t.f32_ty, t.f1, spirv::ext2(b, t.f32_ty, t.glsl, glsl_fmax(), distance, t.eps_dist))
+    towards := spirv::binary(b, op_vector_times_scalar(), t.vec3, to_light, inverse_distance)
+    facing := spirv::ext2(b, t.f32_ty, t.glsl, glsl_fmax(), spirv::binary(b, op_dot(), t.f32_ty, normal, towards), t.f0)
+    strength := spirv::binary(b, op_fmul(), t.f32_ty,
+        spirv::binary(b, op_fmul(), t.f32_ty, falloff, facing),
+        spirv::extract(b, t.f32_ty, point_colour, 3))
+    point_light := spirv::binary(b, op_vector_times_scalar(), t.vec3,
+        spirv::shuffle3(b, t.vec3, point_colour, 0, 1, 2), strength)
+    light := spirv::binary(b, op_fadd(), t.vec3, lit_by_sky, point_light)
+    lit := spirv::binary(b, op_fmul(), t.vec3, base_rgb, light)
+
+    // Linear fog by distance from the eye, using the same clamp rule as three_d::Fog::factor.
+    fog_colour := load_vec4(b, t, p, 9)
+    fog_range := load_vec4(b, t, p, 10)
+    eye := spirv::shuffle3(b, t.vec3, load_vec4(b, t, p, 6), 0, 1, 2)
+    eye_distance := spirv::ext1(b, t.f32_ty, t.glsl, glsl_length(), spirv::binary(b, op_fsub(), t.vec3, world, eye))
+    fog_start := spirv::extract(b, t.f32_ty, fog_range, 0)
+    fog_span := spirv::ext2(b, t.f32_ty, t.glsl, glsl_fmax(),
+        spirv::binary(b, op_fsub(), t.f32_ty, spirv::extract(b, t.f32_ty, fog_range, 1), fog_start), t.eps_range)
+    fog_t := spirv::binary(b, op_fdiv(), t.f32_ty, spirv::binary(b, op_fsub(), t.f32_ty, eye_distance, fog_start), fog_span)
+    fog_clamped := spirv::ext3(b, t.f32_ty, t.glsl, glsl_fclamp(), fog_t, t.f0, t.f1)
+    fog_amount := spirv::binary(b, op_fmul(), t.f32_ty, fog_clamped, spirv::extract(b, t.f32_ty, fog_colour, 3))
+    // FMix needs x, y and a to share one type, so the scalar amount is splatted to a vec3 first.
+    fog_amount3 := spirv::construct3(b, t.vec3, fog_amount, fog_amount, fog_amount)
+    fogged := spirv::ext3(b, t.vec3, t.glsl, glsl_fmix(), lit, spirv::shuffle3(b, t.vec3, fog_colour, 0, 1, 2), fog_amount3)
+    colour := spirv::construct4(b, t.vec4,
+        spirv::extract(b, t.f32_ty, fogged, 0),
+        spirv::extract(b, t.f32_ty, fogged, 1),
+        spirv::extract(b, t.f32_ty, fogged, 2),
+        alpha)
+    spirv::store(b, out_color, colour)
+    spirv::return_void(b)
+    spirv::function_end(b)
+    module := spirv::finish(b, 4, main)
+    spirv::release_builder(b)
+    return module
+}
